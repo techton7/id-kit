@@ -1,0 +1,23 @@
+[package]
+name = "uid-prefix"
+version = "0.1.0"
+edition = "2021"
+authors = ["GoCoder <gocoder7@gmail.com>"]
+license = "MIT OR Apache-2.0"
+description = "Git-style short UID prefix resolution, LCP collision disambiguation, and dynamic prefix abbreviation in Rust."
+repository = "https://github.com/techton7/uid-prefix"
+readme = "README.md"
+keywords = ["prefix", "uid", "uuid", "ulid", "disambiguation"]
+categories = ["command-line-utilities", "data-structures"]
+
+[features]
+default = []
+serde = ["dep:serde"]
+
+[dependencies]
+serde = { version = "1.0", optional = true, features = ["derive"] }
+
+[dev-dependencies]
+pretty_assertions = "1.4"
+serde_json = "1.0"
+uuid = { version = "1.10", features = ["v4"] }
