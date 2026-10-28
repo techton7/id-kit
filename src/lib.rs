@@ -1,4 +1,4 @@
-//! # uid-prefix
+//! # id-kit
 //!
 //! Fast, zero-dependency Git-style short UID resolution, LCP collision disambiguation,
 //! and dynamic prefix abbreviation in Rust.
@@ -15,7 +15,7 @@
 //! ## Quick Start
 //!
 //! ```rust
-//! use uid_prefix::{resolve_prefix, UidAbbreviator, PrefixError};
+//! use id_kit::{resolve_prefix, UidAbbreviator, PrefixError};
 //!
 //! let uids = vec![
 //!     "01M5VDRGAAAA",

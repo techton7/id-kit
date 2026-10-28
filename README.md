@@ -1,10 +1,10 @@
-# uid-prefix
+# id-kit
 
-[![Crates.io](https://img.shields.io/crates/v/uid-prefix.svg)](https://crates.io/crates/uid-prefix)
-[![Documentation](https://docs.rs/uid-prefix/badge.svg)](https://docs.rs/uid-prefix)
+[![Crates.io](https://img.shields.io/crates/v/id-kit.svg)](https://crates.io/crates/id-kit)
+[![Documentation](https://docs.rs/id-kit/badge.svg)](https://docs.rs/id-kit)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 
-**Fast, zero-dependency Git-style short UID resolution, pairwise LCP collision disambiguation, and dynamic prefix abbreviation in Rust.**
+**Fast, zero-dependency Git-style short ID resolution, pairwise LCP collision disambiguation, and dynamic prefix abbreviation in Rust.**
 
 Designed for CLI applications, databases, and developer tools operating on UUIDs, ULIDs, Git commit hashes, or any string-based unique identifiers.
 
@@ -26,10 +26,10 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-uid-prefix = "0.1"
+id-kit = "0.1"
 
 # With optional serde support for PrefixError and AmbiguousCandidate:
-# uid-prefix = { version = "0.1", features = ["serde"] }
+# id-kit = { version = "0.1", features = ["serde"] }
 ```
 
 ---
@@ -39,7 +39,7 @@ uid-prefix = "0.1"
 ### 1. Simple ID Prefix Resolution
 
 ```rust
-use uid_prefix::{resolve_prefix, PrefixError};
+use id_kit::{resolve_prefix, PrefixError};
 
 let uids = vec![
     "01M5VDRGAAAA",
@@ -65,10 +65,10 @@ match resolve_prefix("01M5VDRG", &uids) {
 
 ### 2. Resolving Custom Domain Objects (`resolve_prefix_by`)
 
-Avoid intermediate Lookups by resolving directly against your domain structs:
+Avoid intermediate lookups by resolving directly against your domain structs:
 
 ```rust
-use uid_prefix::{resolve_prefix_by, PrefixError};
+use id_kit::{resolve_prefix_by, PrefixError};
 
 #[derive(Clone, Debug)]
 struct Task {
@@ -90,7 +90,7 @@ assert_eq!(res.unwrap().title, "Parser");
 Display shortened IDs in your CLI without risk of ambiguity:
 
 ```rust
-use uid_prefix::UidAbbreviator;
+use id_kit::UidAbbreviator;
 
 let uids = vec![
     "01M5VDRG2E2DVBXJST67N1JWPD",

@@ -1,13 +1,13 @@
 [package]
-name = "uid-prefix"
+name = "id-kit"
 version = "0.1.0"
 edition = "2021"
 authors = ["GoCoder <gocoder7@gmail.com>"]
 license = "MIT OR Apache-2.0"
-description = "Git-style short UID prefix resolution, LCP collision disambiguation, and dynamic prefix abbreviation in Rust."
-repository = "https://github.com/techton7/uid-prefix"
+description = "Zero-ceremony ID toolkit in Rust: format validation, short prefix resolution, LCP collision disambiguation, and unique abbreviation."
+repository = "https://github.com/techton7/id-kit"
 readme = "README.md"
-keywords = ["prefix", "uid", "uuid", "ulid", "disambiguation"]
+keywords = ["prefix", "id", "uuid", "ulid", "disambiguation"]
 categories = ["command-line-utilities", "data-structures"]
 
 [features]
