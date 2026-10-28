@@ -1,0 +1,3 @@
+local.db*
+*.lock
+worktrees/

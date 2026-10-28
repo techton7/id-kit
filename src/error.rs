@@ -1,76 +1,139 @@
 use std::fmt;
 
-/// Candidate item details returned when a prefix matches multiple candidates ambiguously.
+/// Error returned when resolving an identifier prefix fails.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub struct AmbiguousCandidate<T> {
-    /// The original candidate item (or an identifier payload).
-    pub item: T,
-    /// The full canonical ID string.
-    pub id: String,
-    /// The slice of the ID of length `required_len` needed to uniquely disambiguate this candidate.
-    pub disambiguated_prefix: String,
-}
-
-/// Errors returned during prefix resolution.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum PrefixError<T> {
-    /// The input prefix does not satisfy the minimum character length requirement.
-    TooShort {
-        prefix: String,
-        actual_len: usize,
-        min_len: usize,
-    },
-    /// No candidates matched the given prefix.
+pub enum ResolveError {
+    /// No identifier matches the requested prefix.
     NotFound {
+        /// The prefix that had no matching identifiers.
         prefix: String,
     },
-    /// The prefix matched multiple candidates. Contains the exact `required_len`
-    /// (based on pairwise Longest Common Prefix) and the list of colliding candidates.
+    /// Multiple identifiers match the requested prefix.
     Ambiguous {
+        /// The ambiguous prefix provided.
         prefix: String,
+        /// The list of candidates matching the prefix.
+        candidates: Vec<String>,
+        /// The minimum prefix length needed to disambiguate among candidates.
         required_len: usize,
-        candidates: Vec<AmbiguousCandidate<T>>,
     },
 }
 
-impl<T> fmt::Display for PrefixError<T>
-where
-    T: fmt::Display,
-{
+impl fmt::Display for ResolveError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::TooShort {
-                prefix,
-                actual_len,
-                min_len,
-            } => {
-                write!(
-                    f,
-                    "Prefix '{prefix}' has length {actual_len}, but minimum required length is {min_len} characters"
-                )
-            }
             Self::NotFound { prefix } => {
-                write!(f, "No item found matching prefix '{prefix}'")
+                write!(f, "no identifier matching prefix '{prefix}'")
             }
             Self::Ambiguous {
                 prefix,
-                required_len,
                 candidates,
+                required_len,
             } => {
-                writeln!(
+                write!(
                     f,
-                    "Ambiguous prefix '{prefix}' matched {} items (use at least {required_len} characters to disambiguate):",
-                    candidates.len()
-                )?;
-                for c in candidates {
-                    writeln!(f, "  • {} (id: {})", c.item, c.id)?;
-                }
-                Ok(())
+                    "ambiguous prefix '{prefix}': matches {} candidates (requires {} characters to disambiguate): {:?}",
+                    candidates.len(),
+                    required_len,
+                    candidates
+                )
             }
         }
     }
 }
 
-impl<T> std::error::Error for PrefixError<T> where T: fmt::Debug + fmt::Display {}
+impl std::error::Error for ResolveError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_not_found_display() {
+        let err = ResolveError::NotFound {
+            prefix: "abc".to_string(),
+        };
+        assert_eq!(err.to_string(), "no identifier matching prefix 'abc'");
+    }
+
+    #[test]
+    fn test_ambiguous_display() {
+        let err = ResolveError::Ambiguous {
+            prefix: "ab".to_string(),
+            candidates: vec!["abc1".to_string(), "abc2".to_string()],
+            required_len: 4,
+        };
+        assert_eq!(
+            err.to_string(),
+            "ambiguous prefix 'ab': matches 2 candidates (requires 4 characters to disambiguate): [\"abc1\", \"abc2\"]"
+        );
+    }
+
+    #[test]
+    fn test_error_trait() {
+        fn assert_error<E: std::error::Error + Send + Sync + 'static>(_: &E) {}
+
+        let err_nf = ResolveError::NotFound {
+            prefix: "abc".to_string(),
+        };
+        let err_amb = ResolveError::Ambiguous {
+            prefix: "ab".to_string(),
+            candidates: vec!["abc1".to_string()],
+            required_len: 4,
+        };
+
+        assert_error(&err_nf);
+        assert_error(&err_amb);
+        assert!(std::error::Error::source(&err_nf).is_none());
+        assert!(std::error::Error::source(&err_amb).is_none());
+    }
+
+    #[test]
+    fn test_clone_and_equality() {
+        let err1 = ResolveError::NotFound {
+            prefix: "abc".to_string(),
+        };
+        let err2 = err1.clone();
+        assert_eq!(err1, err2);
+
+        let err3 = ResolveError::NotFound {
+            prefix: "xyz".to_string(),
+        };
+        assert_ne!(err1, err3);
+
+        let err_amb1 = ResolveError::Ambiguous {
+            prefix: "ab".to_string(),
+            candidates: vec!["abc1".to_string(), "abc2".to_string()],
+            required_len: 4,
+        };
+        let err_amb2 = err_amb1.clone();
+        assert_eq!(err_amb1, err_amb2);
+        assert_ne!(err1, err_amb1);
+
+        let err_amb3 = ResolveError::Ambiguous {
+            prefix: "ab".to_string(),
+            candidates: vec!["abc1".to_string()],
+            required_len: 4,
+        };
+        assert_ne!(err_amb1, err_amb3);
+    }
+
+    #[test]
+    fn test_debug_format() {
+        let err_nf = ResolveError::NotFound {
+            prefix: "abc".to_string(),
+        };
+        let debug_nf = format!("{err_nf:?}");
+        assert!(debug_nf.contains("NotFound"));
+        assert!(debug_nf.contains("abc"));
+
+        let err_amb = ResolveError::Ambiguous {
+            prefix: "ab".to_string(),
+            candidates: vec!["abc1".to_string()],
+            required_len: 4,
+        };
+        let debug_amb = format!("{err_amb:?}");
+        assert!(debug_amb.contains("Ambiguous"));
+        assert!(debug_amb.contains("abc1"));
+    }
+}

@@ -1,0 +1,400 @@
+//! Identifier prefix lookup and resolution utilities.
+//!
+//! This module provides functions and extension traits to resolve an item from a
+//! collection of candidates using a prefix of its identifier.
+//!
+//! - [`find_by_id_prefix`]: Top-level function for resolving by prefix.
+//! - [`IdSliceExt`]: Extension trait implemented for slices `[T]`, providing `.find_by_id_prefix(prefix)`.
+//!
+//! Resolution succeeds with [`Ok`] when exactly one candidate matches the prefix.
+//! If zero candidates match, [`ResolveError::NotFound`] is returned.
+//! If two or more candidates match, [`ResolveError::Ambiguous`] is returned along with
+//! the list of conflicting candidate IDs and the minimum prefix length needed to disambiguate them.
+//!
+//! # Examples
+//!
+//! ```rust
+//! use id_kit::{find_by_id_prefix, IdSliceExt};
+//!
+//! let candidates = vec!["commit-1a2b", "commit-3c4d", "branch-main"];
+//!
+//! // Top-level function
+//! let found = find_by_id_prefix(&candidates, "commit-1").unwrap();
+//! assert_eq!(*found, "commit-1a2b");
+//!
+//! // Extension trait on slice
+//! let found = candidates.find_by_id_prefix("branch").unwrap();
+//! assert_eq!(*found, "branch-main");
+//! ```
+
+use crate::error::ResolveError;
+use crate::identifiable::Identifiable;
+use crate::unique::divergence_len;
+
+/// Finds a single item by prefix matching its identifier.
+///
+/// Matches using exact case-sensitive `starts_with`.
+///
+/// # Errors
+/// - `ResolveError::NotFound` if no candidates match `prefix`.
+/// - `ResolveError::Ambiguous` if multiple candidates match `prefix`.
+///   The `required_len` field indicates the minimum length needed to disambiguate the candidates.
+pub fn find_by_id_prefix<'a, T: Identifiable>(
+    candidates: &'a [T],
+    prefix: &str,
+) -> Result<&'a T, ResolveError> {
+    let mut matches: Vec<&'a T> = Vec::new();
+
+    for candidate in candidates {
+        if candidate.id().starts_with(prefix) {
+            matches.push(candidate);
+        }
+    }
+
+    match matches.len() {
+        0 => Err(ResolveError::NotFound {
+            prefix: prefix.to_string(),
+        }),
+        1 => Ok(matches[0]),
+        _ => {
+            let mut max_divergence = prefix.len();
+            for i in 0..matches.len() {
+                for j in (i + 1)..matches.len() {
+                    let id_i = matches[i].id();
+                    let id_j = matches[j].id();
+                    let div_ij = divergence_len(id_i, id_j);
+                    let div_ji = divergence_len(id_j, id_i);
+                    max_divergence = max_divergence.max(div_ij).max(div_ji);
+                }
+            }
+
+            let matching_ids: Vec<String> =
+                matches.iter().map(|item| item.id().to_string()).collect();
+
+            Err(ResolveError::Ambiguous {
+                prefix: prefix.to_string(),
+                candidates: matching_ids,
+                required_len: max_divergence,
+            })
+        }
+    }
+}
+
+/// Extension trait for slices whose elements implement [`Identifiable`].
+pub trait IdSliceExt<T: Identifiable> {
+    /// Finds a single item whose identifier starts with `prefix`.
+    ///
+    /// # Errors
+    /// - `ResolveError::NotFound` if no candidates match `prefix`.
+    /// - `ResolveError::Ambiguous` if multiple candidates match `prefix`.
+    fn find_by_id_prefix(&self, prefix: &str) -> Result<&T, ResolveError>;
+}
+
+impl<T: Identifiable> IdSliceExt<T> for [T] {
+    #[inline]
+    fn find_by_id_prefix(&self, prefix: &str) -> Result<&T, ResolveError> {
+        find_by_id_prefix(self, prefix)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::impl_identifiable;
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct MockItem {
+        id: String,
+        description: String,
+    }
+
+    impl_identifiable!(MockItem, id);
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct StaticItem {
+        key: &'static str,
+        value: i32,
+    }
+
+    impl Identifiable for StaticItem {
+        fn id(&self) -> &str {
+            self.key
+        }
+    }
+
+    #[test]
+    fn test_single_match_ascii_and_domain_structs() {
+        // ASCII &str
+        let strings = ["item-apple", "item-banana", "other-cherry"];
+        let res = find_by_id_prefix(&strings, "item-a");
+        assert_eq!(res, Ok(&"item-apple"));
+
+        // Domain struct with impl_identifiable
+        let items = [
+            MockItem {
+                id: "uuid-1111".to_string(),
+                description: "First".to_string(),
+            },
+            MockItem {
+                id: "uuid-2222".to_string(),
+                description: "Second".to_string(),
+            },
+        ];
+        let found = find_by_id_prefix(&items, "uuid-1");
+        assert_eq!(
+            found,
+            Ok(&MockItem {
+                id: "uuid-1111".to_string(),
+                description: "First".to_string(),
+            })
+        );
+
+        // Domain struct with manual Identifiable
+        let statics = [
+            StaticItem {
+                key: "node-alpha",
+                value: 10,
+            },
+            StaticItem {
+                key: "node-beta",
+                value: 20,
+            },
+        ];
+        let found = find_by_id_prefix(&statics, "node-b");
+        assert_eq!(
+            found,
+            Ok(&StaticItem {
+                key: "node-beta",
+                value: 20,
+            })
+        );
+    }
+
+    #[test]
+    fn test_not_found_when_no_item_starts_with_prefix() {
+        let candidates = ["apple", "banana", "cherry"];
+        let err = find_by_id_prefix(&candidates, "date").unwrap_err();
+        assert_eq!(
+            err,
+            ResolveError::NotFound {
+                prefix: "date".to_string(),
+            }
+        );
+
+        // Also test partial mismatch (prefix exists in substring but not start)
+        let err2 = find_by_id_prefix(&candidates, "anana").unwrap_err();
+        assert_eq!(
+            err2,
+            ResolveError::NotFound {
+                prefix: "anana".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_not_found_on_empty_candidate_slice() {
+        let empty_slice: &[&str] = &[];
+        let err = find_by_id_prefix(empty_slice, "anything").unwrap_err();
+        assert_eq!(
+            err,
+            ResolveError::NotFound {
+                prefix: "anything".to_string(),
+            }
+        );
+
+        let empty_vec: Vec<MockItem> = Vec::new();
+        let err_vec = find_by_id_prefix(&empty_vec, "prefix").unwrap_err();
+        assert_eq!(
+            err_vec,
+            ResolveError::NotFound {
+                prefix: "prefix".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_ambiguous_two_or_more_items() {
+        let candidates = ["commit-100", "commit-101", "commit-200", "commit-300"];
+        let err = find_by_id_prefix(&candidates, "commit-10").unwrap_err();
+        assert_eq!(
+            err,
+            ResolveError::Ambiguous {
+                prefix: "commit-10".to_string(),
+                candidates: vec!["commit-100".to_string(), "commit-101".to_string()],
+                required_len: 10,
+            }
+        );
+
+        // Ambiguous across 3 candidates with different divergences
+        let items = ["node-10a", "node-10b", "node-10c", "node-200"];
+        let err3 = find_by_id_prefix(&items, "node-1").unwrap_err();
+        assert_eq!(
+            err3,
+            ResolveError::Ambiguous {
+                prefix: "node-1".to_string(),
+                candidates: vec![
+                    "node-10a".to_string(),
+                    "node-10b".to_string(),
+                    "node-10c".to_string()
+                ],
+                required_len: 8,
+            }
+        );
+    }
+
+    #[test]
+    fn test_exact_case_sensitivity() {
+        let candidates = ["ABC-01", "abc-02", "Abc-03"];
+
+        // "abc" should match only "abc-02"
+        let res_lower = find_by_id_prefix(&candidates, "abc");
+        assert_eq!(res_lower, Ok(&"abc-02"));
+
+        // "ABC" should match only "ABC-01"
+        let res_upper = find_by_id_prefix(&candidates, "ABC");
+        assert_eq!(res_upper, Ok(&"ABC-01"));
+
+        // "Abc" should match only "Abc-03"
+        let res_title = find_by_id_prefix(&candidates, "Abc");
+        assert_eq!(res_title, Ok(&"Abc-03"));
+
+        // "aBC" does not exist -> NotFound
+        let res_none = find_by_id_prefix(&candidates, "aBC");
+        assert_eq!(
+            res_none,
+            Err(ResolveError::NotFound {
+                prefix: "aBC".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_multibyte_utf8_prefix_matching() {
+        // Korean test cases
+        let candidates = ["사용자-001", "사용자-002", "관리자-001"];
+
+        // Single unique prefix match
+        let found = find_by_id_prefix(&candidates, "관리");
+        assert_eq!(found, Ok(&"관리자-001"));
+
+        // Ambiguous match with Korean characters
+        // "사용자-001" and "사용자-002": LCP is "사용자-00" (3*3 + 1 + 2 = 12 bytes), divergence requires 13 bytes
+        let err = find_by_id_prefix(&candidates, "사용").unwrap_err();
+        assert_eq!(
+            err,
+            ResolveError::Ambiguous {
+                prefix: "사용".to_string(),
+                candidates: vec!["사용자-001".to_string(), "사용자-002".to_string()],
+                required_len: 13,
+            }
+        );
+
+        // Accented characters (e.g. French / Italian)
+        let accents = ["café-latte", "café-mocha", "caffè-macchiato"];
+        let found_accent = find_by_id_prefix(&accents, "caffè");
+        assert_eq!(found_accent, Ok(&"caffè-macchiato"));
+
+        let err_accent = find_by_id_prefix(&accents, "café").unwrap_err();
+        assert_eq!(
+            err_accent,
+            ResolveError::Ambiguous {
+                prefix: "café".to_string(),
+                candidates: vec!["café-latte".to_string(), "café-mocha".to_string()],
+                // "café-" has 3 ('caf') + 2 ('é') + 1 ('-') = 6 bytes.
+                // Next char 'l' or 'm' is 1 byte -> required_len = 7 bytes ("café-l").
+                required_len: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn test_trait_extension_method_vs_top_level_function() {
+        let candidates = vec!["deploy-prod", "deploy-staging", "test-unit"];
+
+        // Top-level function
+        let res_fn = find_by_id_prefix(&candidates, "deploy-p");
+        // Extension method on slice (&[T])
+        let res_trait = candidates.find_by_id_prefix("deploy-p");
+
+        assert_eq!(res_fn, res_trait);
+        assert_eq!(res_trait, Ok(&"deploy-prod"));
+
+        // Error cases via extension method
+        assert_eq!(
+            candidates.find_by_id_prefix("nonexistent"),
+            find_by_id_prefix(&candidates, "nonexistent")
+        );
+        assert_eq!(
+            candidates.find_by_id_prefix("deploy-"),
+            find_by_id_prefix(&candidates, "deploy-")
+        );
+    }
+
+    #[test]
+    fn test_full_id_exact_match() {
+        let candidates = ["item-10", "item-20", "other-30"];
+
+        // Prefix exactly equals "item-10"
+        let found = find_by_id_prefix(&candidates, "item-10");
+        assert_eq!(found, Ok(&"item-10"));
+
+        // If another item has "item-10" as prefix, then full ID match is ambiguous
+        let candidates_with_nested = ["item-10", "item-10-sub"];
+        let err = find_by_id_prefix(&candidates_with_nested, "item-10").unwrap_err();
+        assert_eq!(
+            err,
+            ResolveError::Ambiguous {
+                prefix: "item-10".to_string(),
+                candidates: vec!["item-10".to_string(), "item-10-sub".to_string()],
+                required_len: 8,
+            }
+        );
+    }
+
+    #[test]
+    fn test_disambiguation_nested_prefixes() {
+        let candidates = ["prefix-a", "prefix-ab", "prefix-xyz"];
+
+        let err = find_by_id_prefix(&candidates, "prefix-a").unwrap_err();
+        assert_eq!(
+            err,
+            ResolveError::Ambiguous {
+                prefix: "prefix-a".to_string(),
+                candidates: vec!["prefix-a".to_string(), "prefix-ab".to_string()],
+                required_len: 9,
+            }
+        );
+    }
+
+    #[test]
+    fn test_empty_prefix_behavior() {
+        // Empty prefix matches everything starting with ""
+        let single = ["single-item"];
+        assert_eq!(find_by_id_prefix(&single, ""), Ok(&"single-item"));
+
+        let multiple = ["alpha", "beta"];
+        let err = find_by_id_prefix(&multiple, "").unwrap_err();
+        assert_eq!(
+            err,
+            ResolveError::Ambiguous {
+                prefix: "".to_string(),
+                candidates: vec!["alpha".to_string(), "beta".to_string()],
+                required_len: 1, // 'a' vs 'b' diverges at 1
+            }
+        );
+    }
+
+    #[test]
+    fn test_identical_duplicate_ids() {
+        let candidates = ["dup-id", "dup-id"];
+        let err = find_by_id_prefix(&candidates, "dup").unwrap_err();
+        assert_eq!(
+            err,
+            ResolveError::Ambiguous {
+                prefix: "dup".to_string(),
+                candidates: vec!["dup-id".to_string(), "dup-id".to_string()],
+                required_len: 6,
+            }
+        );
+    }
+}

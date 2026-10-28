@@ -1,23 +1,13 @@
 [package]
 name = "id-kit"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["GoCoder <gocoder7@gmail.com>"]
 license = "MIT OR Apache-2.0"
-description = "Zero-ceremony ID toolkit in Rust: format validation, short prefix resolution, LCP collision disambiguation, and unique abbreviation."
+description = "Zero-dependency Rust ID toolkit: prefix-based ID lookup, LCP collision disambiguation, and minimal unique prefix truncation."
 repository = "https://github.com/techton7/id-kit"
 readme = "README.md"
 keywords = ["prefix", "id", "uuid", "ulid", "disambiguation"]
 categories = ["command-line-utilities", "data-structures"]
+exclude = ["/.ah"]
 
-[features]
-default = []
-serde = ["dep:serde"]
-
-[dependencies]
-serde = { version = "1.0", optional = true, features = ["derive"] }
-
-[dev-dependencies]
-pretty_assertions = "1.4"
-serde_json = "1.0"
-uuid = { version = "1.10", features = ["v4"] }
