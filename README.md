@@ -12,10 +12,12 @@ Zero-dependency, `#![forbid(unsafe_code)]` Rust toolkit specializing strictly in
 ## Key Properties
 
 - **Zero External Dependencies**: Implemented using standard library primitives (`std` only).
+- **Closure-Based Key Extraction**: Extractor closures (`key_fn: Fn(&'a T) -> K` where `K: AsRef<str>`) allow searching and truncating collections of domain structs and foreign DTOs directly without implementing traits or adapting data structures.
+- **Owned String Returns & Safe Inline Chaining**: `truncate_id_by_unique` returns `String` and `split_id_by_unique` returns `(String, String)`. Because methods accept `target: impl AsRef<str>`, temporary expressions like `item.id.to_string().truncate_id_by_unique(...)` chain inline without lifetime or borrow conflicts (`E0716`).
 - **Exact Matching**: Prefix lookups use case-sensitive exact matching (`starts_with`) without implicit transformations or trimming.
 - **UTF-8 Safety**: Length calculations operate on byte offsets while enforcing valid Unicode scalar value boundaries via character boundary ceiling (`ceil_char_boundary`). Slicing panics on multi-byte codepoints are prevented.
 - **Memory Safety**: Enforced with `#![forbid(unsafe_code)]`.
-- **Lifetime Independence**: Truncation and splitting return string slices tied to the lifetime of the target identifier, independent of candidate collections.
+- **Lifetime Independence**: Returned prefixes and remainders are owned strings independent of the candidate collection lifetime.
 
 ---
 
@@ -25,14 +27,14 @@ Add the dependency to `Cargo.toml`:
 
 ```toml
 [dependencies]
-id-kit = "0.1.1"
+id-kit = "0.2.0"
 ```
 
 ---
 
 ## Quickstart
 
-Import the prelude to bring core traits, functions, and macros into scope:
+Import the prelude to bring core traits and functions into scope:
 
 ```rust
 use id_kit::prelude::*;
@@ -42,8 +44,6 @@ struct Task {
     id: String,
     title: String,
 }
-
-impl_identifiable!(Task, id);
 
 fn main() -> Result<(), ResolveError> {
     let tasks = vec![
@@ -62,7 +62,7 @@ fn main() -> Result<(), ResolveError> {
     ];
 
     // 1. Prefix lookup: ambiguous prefix returns ResolveError::Ambiguous
-    match tasks.find_by_id_prefix("task-d") {
+    match tasks.find_by_id_prefix("task-d", |t| &t.id) {
         Err(ResolveError::Ambiguous { prefix, candidates, required_len }) => {
             assert_eq!(prefix, "task-d");
             assert_eq!(candidates.len(), 2);
@@ -72,15 +72,15 @@ fn main() -> Result<(), ResolveError> {
     }
 
     // Lookup with disambiguated prefix resolves uniquely
-    let task = tasks.find_by_id_prefix("task-deploy-w")?;
+    let task = tasks.find_by_id_prefix("task-deploy-w", |t| &t.id)?;
     assert_eq!(task.title, "Deploy web service");
 
     // 2. Minimal unique prefix truncation (min_len: 5)
-    let unique_prefix = task.truncate_id_by_unique(5, &tasks);
+    let unique_prefix = task.id.truncate_id_by_unique(5, &tasks, |t| &t.id);
     assert_eq!(unique_prefix, "task-deploy-w");
 
     // 3. Minimal unique prefix splitting
-    let (prefix, remainder) = task.split_id_by_unique(5, &tasks);
+    let (prefix, remainder) = task.id.split_id_by_unique(5, &tasks, |t| &t.id);
     assert_eq!(prefix, "task-deploy-w");
     assert_eq!(remainder, "eb");
 
@@ -98,14 +98,28 @@ Prefix lookup resolves a single item from a candidate collection whose identifie
 
 #### Trait Extension Method
 
-Available on slices `[T]` where `T: Identifiable`:
+Available on slices `[T]` via [`IdSliceExt`]:
+
+```rust
+pub trait IdSliceExt<T> {
+    fn find_by_id_prefix<'a, K, F>(
+        &'a self,
+        prefix: &str,
+        key_fn: F,
+    ) -> Result<&'a T, ResolveError>
+    where
+        T: 'a,
+        F: Fn(&'a T) -> K,
+        K: AsRef<str>;
+}
+```
 
 ```rust
 use id_kit::prelude::*;
 
 let candidates = vec!["item-alpha", "item-alpine", "item-beta"];
 
-let matched = candidates.find_by_id_prefix("item-alpi")?;
+let matched = candidates.find_by_id_prefix("item-alpi", |s| *s)?;
 assert_eq!(*matched, "item-alpine");
 # Ok::<(), ResolveError>(())
 ```
@@ -113,11 +127,22 @@ assert_eq!(*matched, "item-alpine");
 #### Top-Level Function
 
 ```rust
+pub fn find_by_id_prefix<'a, T, K, F>(
+    candidates: &'a [T],
+    prefix: &str,
+    key_fn: F,
+) -> Result<&'a T, ResolveError>
+where
+    F: Fn(&'a T) -> K,
+    K: AsRef<str>;
+```
+
+```rust
 use id_kit::find_by_id_prefix;
 
 let candidates = vec!["item-alpha", "item-alpine", "item-beta"];
 
-let matched = find_by_id_prefix(&candidates, "item-alpi")?;
+let matched = find_by_id_prefix(&candidates, "item-alpi", |s| *s)?;
 assert_eq!(*matched, "item-alpine");
 # Ok::<(), id_kit::ResolveError>(())
 ```
@@ -139,7 +164,7 @@ use id_kit::prelude::*;
 
 let candidates = vec!["item-alpha", "item-alpine", "item-beta"];
 
-match candidates.find_by_id_prefix("item-alp") {
+match candidates.find_by_id_prefix("item-alp", |s| *s) {
     Err(ResolveError::Ambiguous { prefix, candidates, required_len }) => {
         assert_eq!(prefix, "item-alp");
         assert_eq!(candidates, vec!["item-alpha", "item-alpine"]);
@@ -157,10 +182,35 @@ Computes the shortest prefix of a target identifier that distinguishes it from a
 
 #### Trait Extension Methods
 
-Available on any type implementing `IdUniqueExt` (blanket implementation for all `T: Identifiable`):
+Available on any string-like type via [`IdUniqueExt`] (blanket implementation for all `S: AsRef<str> + ?Sized`):
 
-- `target.truncate_id_by_unique(min_len, &candidates) -> &str`
-- `target.split_id_by_unique(min_len, &candidates) -> (&str, &str)`
+```rust
+pub trait IdUniqueExt {
+    fn truncate_id_by_unique<'a, T, I, K, F>(
+        &self,
+        min_len: usize,
+        candidates: I,
+        key_fn: F,
+    ) -> String
+    where
+        T: 'a,
+        I: IntoIterator<Item = &'a T>,
+        F: Fn(&'a T) -> K,
+        K: AsRef<str>;
+
+    fn split_id_by_unique<'a, T, I, K, F>(
+        &self,
+        min_len: usize,
+        candidates: I,
+        key_fn: F,
+    ) -> (String, String)
+    where
+        T: 'a,
+        I: IntoIterator<Item = &'a T>,
+        F: Fn(&'a T) -> K,
+        K: AsRef<str>;
+}
+```
 
 ```rust
 use id_kit::prelude::*;
@@ -169,11 +219,11 @@ let target = "commit-a1b2c3";
 let candidates = vec!["commit-a1b2d4", "commit-a1b999", "commit-f00000"];
 
 // Truncate to minimal unique prefix (with min_len = 4)
-let prefix = target.truncate_id_by_unique(4, &candidates);
+let prefix = target.truncate_id_by_unique(4, &candidates, |s| *s);
 assert_eq!(prefix, "commit-a1b2c");
 
 // Split into unique prefix and remaining suffix
-let (unique_part, remainder) = target.split_id_by_unique(4, &candidates);
+let (unique_part, remainder) = target.split_id_by_unique(4, &candidates, |s| *s);
 assert_eq!(unique_part, "commit-a1b2c");
 assert_eq!(remainder, "3");
 ```
@@ -181,22 +231,48 @@ assert_eq!(remainder, "3");
 #### Top-Level Functions
 
 ```rust
-use id_kit::{truncate_id_by_unique, split_id_by_unique};
+pub fn truncate_id_by_unique<'a, T, I, K, F>(
+    target: impl AsRef<str>,
+    min_len: usize,
+    candidates: I,
+    key_fn: F,
+) -> String
+where
+    T: 'a,
+    I: IntoIterator<Item = &'a T>,
+    F: Fn(&'a T) -> K,
+    K: AsRef<str>;
+
+pub fn split_id_by_unique<'a, T, I, K, F>(
+    target: impl AsRef<str>,
+    min_len: usize,
+    candidates: I,
+    key_fn: F,
+) -> (String, String)
+where
+    T: 'a,
+    I: IntoIterator<Item = &'a T>,
+    F: Fn(&'a T) -> K,
+    K: AsRef<str>;
+```
+
+```rust
+use id_kit::{split_id_by_unique, truncate_id_by_unique};
 
 let target = "commit-a1b2c3";
 let candidates = vec!["commit-a1b2d4", "commit-a1b999", "commit-f00000"];
 
-let prefix = truncate_id_by_unique(&target, 4, &candidates);
+let prefix = truncate_id_by_unique(target, 4, &candidates, |s| *s);
 assert_eq!(prefix, "commit-a1b2c");
 
-let (unique_part, remainder) = split_id_by_unique(&target, 4, &candidates);
+let (unique_part, remainder) = split_id_by_unique(target, 4, &candidates, |s| *s);
 assert_eq!(unique_part, "commit-a1b2c");
 assert_eq!(remainder, "3");
 ```
 
 #### Self-Equality Exclusion
 
-Candidates with identifiers identical to `target.id()` are excluded from collision checks. A collection containing the target itself will not cause self-collision:
+Candidates with identifiers identical to `target.as_ref()` are excluded from collision checks. A collection containing the target itself will not cause self-collision:
 
 ```rust
 use id_kit::prelude::*;
@@ -205,26 +281,26 @@ let target = "task-42";
 let candidates = vec!["task-42", "task-40", "task-50"];
 
 // "task-42" in candidates is skipped; differentiates from "task-40" at byte 7
-let prefix = target.truncate_id_by_unique(2, &candidates);
+let prefix = target.truncate_id_by_unique(2, &candidates, |s| *s);
 assert_eq!(prefix, "task-42");
 ```
 
-#### Lifetime Guarantees
+#### Lifetime Independence
 
-The returned string slice borrows from `&'a target`, not from `candidates`. The candidate collection may be dropped or modified while the returned prefix remains valid:
+The returned values are owned `String` and `(String, String)`, completely independent of the candidate collection lifetime. The candidate collection may be dropped or modified after the operation:
 
 ```rust
 use id_kit::truncate_id_by_unique;
 
 let target = String::from("service-auth-node-1");
-let prefix: &str;
+let prefix: String;
 
 {
     let temporary_candidates = vec![
         String::from("service-auth-node-2"),
         String::from("service-cache-node-1"),
     ];
-    prefix = truncate_id_by_unique(&target, 4, &temporary_candidates);
+    prefix = truncate_id_by_unique(&target, 4, &temporary_candidates, |s| s);
     // temporary_candidates is dropped here
 }
 
@@ -233,64 +309,71 @@ assert_eq!(prefix, "service-auth-node-1");
 
 ---
 
-## Identifiable Trait & Macro
+## Foreign DTOs and Value-Type IDs
 
-The `Identifiable` trait defines a uniform interface for string identifier access:
+`id-kit` works directly with external types (such as `uuid::Uuid`, `ulid::Ulid`, or RPC DTOs) without orphan-rule constraints or wrapper boilerplate.
 
-```rust
-pub trait Identifiable {
-    fn id(&self) -> &str;
-}
-```
+Because `key_fn: Fn(&'a T) -> K` only requires `K: AsRef<str>`, closures can return temporary owned `String` values (`|n| n.id.to_string()`).
 
-### Standard Implementations
-
-`Identifiable` is implemented out of the box for:
-- `str`
-- `&str`
-- `String`
-- `Cow<'_, str>`
-- `Box<T>` where `T: Identifiable + ?Sized`
-- `Rc<T>` where `T: Identifiable + ?Sized`
-- `Arc<T>` where `T: Identifiable + ?Sized`
-- `&T` where `T: Identifiable + ?Sized` (blanket reference implementation)
-
-### Deriving with `impl_identifiable!`
-
-The `impl_identifiable!` macro implements `Identifiable` for structs by delegating to a specified field or tuple index:
+Additionally, because `target: impl AsRef<str>`, methods can be chained inline directly on temporary string instances without causing `E0716` ("temporary value dropped while borrowed"):
 
 ```rust
 use id_kit::prelude::*;
 
-// Standard struct with owned String
-struct Task {
-    id: String,
-    title: String,
-}
-impl_identifiable!(Task, id);
+// Simulated foreign value-type ID (e.g. from uuid or ulid crate)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Uuid([u8; 16]);
 
-// Struct with explicit lifetime parameter
-struct RefTask<'a> {
-    id: &'a str,
+impl std::fmt::Display for Uuid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for byte in &self.0 {
+            write!(f, "{:02x}", byte)?;
+        }
+        Ok(())
+    }
 }
-impl_identifiable!(RefTask<'a>, id);
 
-// Struct with anonymous lifetime
-struct AnonTask<'a> {
-    id: &'a str,
+// Simulated foreign DTO struct
+#[derive(Debug, Clone)]
+struct NodeDto {
+    id: Uuid,
+    name: String,
 }
-impl_identifiable!(AnonTask<'_>, id);
 
-// Generic struct
-struct GenericTask<T> {
-    id: String,
-    data: T,
-}
-impl_identifiable!(GenericTask<T>, id);
+let nodes = vec![
+    NodeDto {
+        id: Uuid([0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0, 0, 0, 0, 0, 0, 0, 1]),
+        name: "gateway-1".to_string(),
+    },
+    NodeDto {
+        id: Uuid([0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xee, 0, 0, 0, 0, 0, 0, 0, 2]),
+        name: "gateway-2".to_string(),
+    },
+    NodeDto {
+        id: Uuid([0x99, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0, 0, 0, 0, 0, 0, 0, 3]),
+        name: "worker-1".to_string(),
+    },
+];
 
-// Tuple struct
-struct TupleTask(String, usize);
-impl_identifiable!(TupleTask, 0);
+// 1. Prefix lookup with closure generating temporary String
+let found = nodes.find_by_id_prefix("9988", |n| n.id.to_string())?;
+assert_eq!(found.name, "worker-1");
+
+// 2. Safe inline chaining on temporary target: node.id.to_string()
+let unique_prefix = nodes[0]
+    .id
+    .to_string()
+    .truncate_id_by_unique(8, &nodes, |n| n.id.to_string());
+assert_eq!(unique_prefix, "0123456789abcdef");
+
+// 3. Safe inline splitting on temporary target
+let (prefix, remainder) = nodes[0]
+    .id
+    .to_string()
+    .split_id_by_unique(8, &nodes, |n| n.id.to_string());
+assert_eq!(prefix, "0123456789abcdef");
+assert_eq!(remainder, "0000000000000001");
+# Ok::<(), ResolveError>(())
 ```
 
 ---
@@ -312,14 +395,14 @@ let target = "사용자-001";
 let candidates = vec!["사용자-002", "관리자-001"];
 
 // LCP is "사용자-00" (12 bytes). Next character '1' (1 byte) requires 13 bytes total.
-let unique = target.truncate_id_by_unique(1, &candidates);
+let unique = target.truncate_id_by_unique(1, &candidates, |s| *s);
 assert_eq!(unique, "사용자-001");
 
 // Boundary snapping:
 // min_len = 2 falls mid-character into 3-byte '사' [0..3].
 // Snapped ceiling advances to byte 3 ('사').
 let single_candidate = vec!["관리자-001"];
-assert_eq!(target.truncate_id_by_unique(2, &single_candidate), "사");
+assert_eq!(target.truncate_id_by_unique(2, &single_candidate, |s| *s), "사");
 ```
 
 Multi-byte safety applies across Korean (Hangul), CJK ideographs, emoji codepoints, and Latin accented characters.

@@ -5,12 +5,12 @@
 //! - Ambiguity disambiguation guarantee with `required_len`.
 //! - AC-2: Lifetime independence of truncated/split slices from candidates.
 //! - AC-3: Complex UTF-8 multi-byte scenarios (Korean, Emoji, 2/3/4-byte code points, boundaries).
-//! - Custom domain structs using `impl_identifiable!`.
+//! - Custom domain structs using key extractor closures.
 //! - Boundary conditions and edge cases (single candidate, duplicates, empty list, bounds).
 
 use id_kit::{
-    find_by_id_prefix, impl_identifiable, split_id_by_unique, truncate_id_by_unique, IdSliceExt,
-    IdUniqueExt, Identifiable, ResolveError,
+    find_by_id_prefix, split_id_by_unique, truncate_id_by_unique, IdSliceExt, IdUniqueExt,
+    ResolveError,
 };
 
 // ============================================================================
@@ -23,26 +23,16 @@ struct Commit {
     message: String,
 }
 
-impl_identifiable!(Commit, hash);
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DeployRecord<'a> {
     id: &'a str,
     environment: &'static str,
 }
 
-impl_identifiable!(DeployRecord<'a>, id);
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct IssueTrackerItem {
     key: String,
     priority: u32,
-}
-
-impl Identifiable for IssueTrackerItem {
-    fn id(&self) -> &str {
-        &self.key
-    }
 }
 
 /// Realistic Git SHA-1 hashes (40 hex characters)
@@ -103,47 +93,48 @@ const NANOID_SAMPLES: &[&str] = &[
 // 1. Round-Trip Consistency (AC-1)
 // ============================================================================
 
-fn verify_round_trip_for_collection<T: Identifiable + std::fmt::Debug>(
-    collection: &[T],
-    min_lens: &[usize],
-) {
+fn verify_round_trip_for_collection<'a, T, K, F>(collection: &'a [T], min_lens: &[usize], key_fn: F)
+where
+    T: std::fmt::Debug + PartialEq + 'a,
+    K: AsRef<str>,
+    F: Fn(&'a T) -> K + Copy,
+{
     for &min_len in min_lens {
         for (idx, item) in collection.iter().enumerate() {
-            let short = item.truncate_id_by_unique(min_len, collection);
+            let item_id = key_fn(item);
+            let item_id_str = item_id.as_ref();
+            let short = item_id_str.truncate_id_by_unique(min_len, collection, key_fn);
             assert!(
-                item.id().starts_with(short),
-                "Truncated prefix '{short}' must be a prefix of target '{}'",
-                item.id()
+                item_id_str.starts_with(&short),
+                "Truncated prefix '{short}' must be a prefix of target '{item_id_str}'"
             );
 
-            let (split_prefix, remainder) = item.split_id_by_unique(min_len, collection);
+            let (split_prefix, remainder) =
+                item_id_str.split_id_by_unique(min_len, collection, key_fn);
             assert_eq!(
-                split_prefix,
-                short,
-                "split prefix must match truncate prefix for '{}'",
-                item.id()
+                split_prefix, short,
+                "split prefix must match truncate prefix for '{item_id_str}'"
             );
             assert_eq!(
                 format!("{split_prefix}{remainder}"),
-                item.id(),
+                item_id_str,
                 "Recombining prefix and remainder must recreate exact target ID"
             );
 
-            let lookup_result = collection.find_by_id_prefix(short);
+            let lookup_result = collection.find_by_id_prefix(&short, key_fn);
             assert!(
                 lookup_result.is_ok(),
-                "Round-trip failed: looking up prefix '{short}' (min_len={min_len}, item[{idx}]='{}') returned error: {:?}",
-                item.id(),
+                "Round-trip failed: looking up prefix '{short}' (min_len={min_len}, item[{idx}]='{item_id_str}') returned error: {:?}",
                 lookup_result.err()
             );
             let resolved = lookup_result.unwrap();
             assert_eq!(
-                resolved.id(),
-                item.id(),
-                "Resolved ID '{}' must match original ID '{}'",
-                resolved.id(),
-                item.id()
+                key_fn(resolved).as_ref(),
+                item_id_str,
+                "Resolved ID '{}' must match original ID '{item_id_str}'",
+                key_fn(resolved).as_ref()
             );
+            assert_eq!(resolved, item);
         }
     }
 }
@@ -151,31 +142,31 @@ fn verify_round_trip_for_collection<T: Identifiable + std::fmt::Debug>(
 #[test]
 fn test_round_trip_git_sha1() {
     let min_lens = [0, 1, 4, 7, 8, 12, 20, 40, 100];
-    verify_round_trip_for_collection(GIT_SHA1_SAMPLES, &min_lens);
+    verify_round_trip_for_collection(GIT_SHA1_SAMPLES, &min_lens, |s| *s);
 }
 
 #[test]
 fn test_round_trip_git_sha256() {
     let min_lens = [0, 4, 7, 12, 32, 64, 128];
-    verify_round_trip_for_collection(GIT_SHA256_SAMPLES, &min_lens);
+    verify_round_trip_for_collection(GIT_SHA256_SAMPLES, &min_lens, |s| *s);
 }
 
 #[test]
 fn test_round_trip_uuids() {
     let min_lens = [0, 4, 8, 14, 20, 36, 50];
-    verify_round_trip_for_collection(UUID_SAMPLES, &min_lens);
+    verify_round_trip_for_collection(UUID_SAMPLES, &min_lens, |s| *s);
 }
 
 #[test]
 fn test_round_trip_ulids() {
     let min_lens = [0, 4, 10, 18, 26, 60];
-    verify_round_trip_for_collection(ULID_SAMPLES, &min_lens);
+    verify_round_trip_for_collection(ULID_SAMPLES, &min_lens, |s| *s);
 }
 
 #[test]
 fn test_round_trip_nanoids() {
     let min_lens = [0, 4, 10, 18, 21, 50];
-    verify_round_trip_for_collection(NANOID_SAMPLES, &min_lens);
+    verify_round_trip_for_collection(NANOID_SAMPLES, &min_lens, |s| *s);
 }
 
 #[test]
@@ -190,7 +181,7 @@ fn test_round_trip_domain_struct_commits() {
         .collect();
 
     let min_lens = [0, 4, 7, 10, 40, 80];
-    verify_round_trip_for_collection(&commits, &min_lens);
+    verify_round_trip_for_collection(&commits, &min_lens, |c| &c.hash);
 }
 
 #[test]
@@ -205,21 +196,26 @@ fn test_round_trip_dynamically_generated_uuids() {
         })
         .collect();
     let min_lens = [0, 4, 8, 12, 36, 100];
-    verify_round_trip_for_collection(&uuids, &min_lens);
+    verify_round_trip_for_collection(&uuids, &min_lens, |s| s.as_str());
 }
 
 // ============================================================================
 // 2. Ambiguity Guarantee
 // ============================================================================
 
-fn verify_ambiguity_disambiguation_guarantee<T: Identifiable + std::fmt::Debug + PartialEq>(
-    candidates: &[T],
+fn verify_ambiguity_disambiguation_guarantee<'a, T, K, F>(
+    candidates: &'a [T],
     ambiguous_prefix: &str,
-) {
-    let err_fn = find_by_id_prefix(candidates, ambiguous_prefix)
+    key_fn: F,
+) where
+    T: std::fmt::Debug + PartialEq + 'a,
+    K: AsRef<str>,
+    F: Fn(&'a T) -> K + Copy,
+{
+    let err_fn = find_by_id_prefix(candidates, ambiguous_prefix, key_fn)
         .expect_err("Expected ambiguity error for ambiguous prefix from find_by_id_prefix");
     let err_ext = candidates
-        .find_by_id_prefix(ambiguous_prefix)
+        .find_by_id_prefix(ambiguous_prefix, key_fn)
         .expect_err("Expected ambiguity error for ambiguous prefix from IdSliceExt");
     assert_eq!(
         err_fn, err_ext,
@@ -251,8 +247,8 @@ fn verify_ambiguity_disambiguation_guarantee<T: Identifiable + std::fmt::Debug +
                 );
 
                 let disambiguated = &cand_id[..required_len];
-                let lookup_fn = find_by_id_prefix(candidates, disambiguated);
-                let lookup_ext = candidates.find_by_id_prefix(disambiguated);
+                let lookup_fn = find_by_id_prefix(candidates, disambiguated, key_fn);
+                let lookup_ext = candidates.find_by_id_prefix(disambiguated, key_fn);
 
                 assert_eq!(lookup_fn, lookup_ext);
                 assert!(
@@ -262,7 +258,7 @@ fn verify_ambiguity_disambiguation_guarantee<T: Identifiable + std::fmt::Debug +
                 );
                 let resolved = lookup_fn.unwrap();
                 assert_eq!(
-                    resolved.id(),
+                    key_fn(resolved).as_ref(),
                     cand_id.as_str(),
                     "Disambiguated prefix must resolve to exact candidate '{cand_id}'"
                 );
@@ -285,10 +281,10 @@ fn test_ambiguity_guarantee_git_shas() {
     ];
 
     // Ambiguous at "e4d909c": colliding are the two "e4d909c..." items, required_len should be 8
-    verify_ambiguity_disambiguation_guarantee(&candidates, "e4d909c");
+    verify_ambiguity_disambiguation_guarantee(&candidates, "e4d909c", |s| *s);
 
     // Ambiguous at "e4d909": colliding are 3 items, required_len should be 8
-    verify_ambiguity_disambiguation_guarantee(&candidates, "e4d909");
+    verify_ambiguity_disambiguation_guarantee(&candidates, "e4d909", |s| *s);
 }
 
 #[test]
@@ -301,9 +297,13 @@ fn test_ambiguity_guarantee_uuids() {
     ];
 
     // Ambiguous at 8 chars
-    verify_ambiguity_disambiguation_guarantee(&candidates, "550e8400");
+    verify_ambiguity_disambiguation_guarantee(&candidates, "550e8400", |s| *s);
     // Ambiguous at 34 chars: "550e8400-e29b-41d4-a716-4466554400"
-    verify_ambiguity_disambiguation_guarantee(&candidates, "550e8400-e29b-41d4-a716-4466554400");
+    verify_ambiguity_disambiguation_guarantee(
+        &candidates,
+        "550e8400-e29b-41d4-a716-4466554400",
+        |s| *s,
+    );
 }
 
 #[test]
@@ -315,8 +315,8 @@ fn test_ambiguity_guarantee_ulids() {
         "99ZZZZZZZZZZZZZZZZZZZZZZZZ",
     ];
 
-    verify_ambiguity_disambiguation_guarantee(&candidates, "01ARZ");
-    verify_ambiguity_disambiguation_guarantee(&candidates, "01ARZ3NDEKTSV4RRFFQ69G5F");
+    verify_ambiguity_disambiguation_guarantee(&candidates, "01ARZ", |s| *s);
+    verify_ambiguity_disambiguation_guarantee(&candidates, "01ARZ3NDEKTSV4RRFFQ69G5F", |s| *s);
 }
 
 #[test]
@@ -328,8 +328,8 @@ fn test_ambiguity_guarantee_nanoids() {
         "ZZZZZZZZZZZZZZZZZZZZZ",
     ];
 
-    verify_ambiguity_disambiguation_guarantee(&candidates, "V1StGXR8");
-    verify_ambiguity_disambiguation_guarantee(&candidates, "V1StGXR8_Z5jdHi6B-my");
+    verify_ambiguity_disambiguation_guarantee(&candidates, "V1StGXR8", |s| *s);
+    verify_ambiguity_disambiguation_guarantee(&candidates, "V1StGXR8_Z5jdHi6B-my", |s| *s);
 }
 
 #[test]
@@ -341,8 +341,8 @@ fn test_ambiguity_guarantee_multibyte_korean() {
         "관리자-root-01",
     ];
 
-    verify_ambiguity_disambiguation_guarantee(&candidates, "사용자");
-    verify_ambiguity_disambiguation_guarantee(&candidates, "사용자-alpha");
+    verify_ambiguity_disambiguation_guarantee(&candidates, "사용자", |s| *s);
+    verify_ambiguity_disambiguation_guarantee(&candidates, "사용자-alpha", |s| *s);
 }
 
 #[test]
@@ -351,7 +351,7 @@ fn test_ambiguity_nested_prefix_candidate() {
     let candidates = ["commit", "commit-feat-1", "branch-main"];
 
     let err = candidates
-        .find_by_id_prefix("com")
+        .find_by_id_prefix("com", |s| *s)
         .expect_err("Should be ambiguous");
     match err {
         ResolveError::Ambiguous {
@@ -370,7 +370,7 @@ fn test_ambiguity_nested_prefix_candidate() {
             let disambiguated = &colliding[1][..required_len];
             assert_eq!(disambiguated, "commit-");
             assert_eq!(
-                candidates.find_by_id_prefix(disambiguated),
+                candidates.find_by_id_prefix(disambiguated, |s| *s),
                 Ok(&"commit-feat-1")
             );
 
@@ -392,8 +392,8 @@ fn test_ambiguity_guarantee_multibyte_emojis() {
         "📦-storage-node-4",
     ];
 
-    verify_ambiguity_disambiguation_guarantee(&candidates, "🚀");
-    verify_ambiguity_disambiguation_guarantee(&candidates, "🚀-worker");
+    verify_ambiguity_disambiguation_guarantee(&candidates, "🚀", |s| *s);
+    verify_ambiguity_disambiguation_guarantee(&candidates, "🚀-worker", |s| *s);
 }
 
 #[test]
@@ -413,7 +413,7 @@ fn test_ambiguity_guarantee_domain_commits() {
         },
     ];
 
-    verify_ambiguity_disambiguation_guarantee(&commits, "commit-100");
+    verify_ambiguity_disambiguation_guarantee(&commits, "commit-100", |c| &c.hash);
 }
 
 // ============================================================================
@@ -423,7 +423,7 @@ fn test_ambiguity_guarantee_domain_commits() {
 #[test]
 fn test_lifetime_independence_str_candidates_dropped() {
     let persistent_target = String::from("service-worker-production-01");
-    let prefix_outlived: &str;
+    let prefix_outlived: String;
 
     {
         // candidates are created in this inner scope and dropped at its close
@@ -433,12 +433,15 @@ fn test_lifetime_independence_str_candidates_dropped() {
             String::from("database-primary-01"),
         ];
 
-        prefix_outlived = truncate_id_by_unique(&persistent_target, 10, &temporary_candidates);
+        prefix_outlived =
+            truncate_id_by_unique(&persistent_target, 10, &temporary_candidates, |s| {
+                s.as_str()
+            });
         // temporary_candidates dropped here
     }
 
     assert_eq!(prefix_outlived, "service-worker-production-01");
-    assert!(persistent_target.starts_with(prefix_outlived));
+    assert!(persistent_target.starts_with(&prefix_outlived));
 }
 
 #[test]
@@ -448,7 +451,7 @@ fn test_lifetime_independence_domain_struct_candidates_dropped() {
         message: "Keep this commit".to_string(),
     };
 
-    let short_hash: &str;
+    let short_hash: String;
     {
         let temporary_commits = vec![
             Commit {
@@ -461,20 +464,22 @@ fn test_lifetime_independence_domain_struct_candidates_dropped() {
             },
         ];
 
-        short_hash = persistent_commit.truncate_id_by_unique(7, &temporary_commits);
+        short_hash = persistent_commit
+            .hash
+            .truncate_id_by_unique(7, &temporary_commits, |c| &c.hash);
         // temporary_commits dropped here
     }
 
     // Divergence between ...c2 and ...c3 requires 8 chars ("e4d909c2")
     assert_eq!(short_hash, "e4d909c2");
-    assert!(persistent_commit.hash.starts_with(short_hash));
+    assert!(persistent_commit.hash.starts_with(&short_hash));
 }
 
 #[test]
 fn test_lifetime_independence_split_id_outliving_scope() {
     let target = String::from("user-session-987654321");
-    let prefix: &str;
-    let remainder: &str;
+    let prefix: String;
+    let remainder: String;
 
     {
         let candidate_scope = vec![
@@ -482,7 +487,7 @@ fn test_lifetime_independence_split_id_outliving_scope() {
             String::from("admin-session-111111111"),
         ];
 
-        let (p, r) = target.split_id_by_unique(5, &candidate_scope);
+        let (p, r) = target.split_id_by_unique(5, &candidate_scope, |s| s.as_str());
         prefix = p;
         remainder = r;
         // candidate_scope dropped here
@@ -504,18 +509,24 @@ fn test_multibyte_korean_exact_scenarios() {
 
     // "가나다1" vs "가나다2": LCP is "가나다" (3*3 = 9 bytes). Divergence requires 10 bytes ("가나다1").
     let target1 = "가나다1";
-    let short1 = target1.truncate_id_by_unique(0, &candidates);
+    let short1 = target1.truncate_id_by_unique(0, &candidates, |s| *s);
     assert_eq!(short1, "가나다1");
-    assert_eq!(candidates.find_by_id_prefix(short1), Ok(&"가나다1"));
+    assert_eq!(
+        candidates.find_by_id_prefix(&short1, |s| *s),
+        Ok(&"가나다1")
+    );
 
     // "가나라" vs ("가나다1", "가나다2"): LCP is "가나" (6 bytes). Divergence requires 6 + 3 = 9 bytes ("가나라").
     let target_ra = "가나라";
-    let short_ra = target_ra.truncate_id_by_unique(0, &candidates);
+    let short_ra = target_ra.truncate_id_by_unique(0, &candidates, |s| *s);
     assert_eq!(short_ra, "가나라");
-    assert_eq!(candidates.find_by_id_prefix(short_ra), Ok(&"가나라"));
+    assert_eq!(
+        candidates.find_by_id_prefix(&short_ra, |s| *s),
+        Ok(&"가나라")
+    );
 
     // Round-trip verification across all Korean items
-    verify_round_trip_for_collection(&candidates, &[0, 1, 3, 6, 9, 10, 20]);
+    verify_round_trip_for_collection(&candidates, &[0, 1, 3, 6, 9, 10, 20], |s| *s);
 }
 
 #[test]
@@ -525,19 +536,28 @@ fn test_multibyte_emoji_identifiers() {
 
     // "🚀-alpha" vs "🚀-beta": LCP is "🚀-" (4 + 1 = 5 bytes).
     // Divergence: 5 + 1 ('a' / 'b') = 6 bytes ("🚀-a" / "🚀-b")
-    let short_alpha = "🚀-alpha".truncate_id_by_unique(0, &candidates);
+    let short_alpha = "🚀-alpha".truncate_id_by_unique(0, &candidates, |s| *s);
     assert_eq!(short_alpha, "🚀-a");
-    assert_eq!(candidates.find_by_id_prefix(short_alpha), Ok(&"🚀-alpha"));
+    assert_eq!(
+        candidates.find_by_id_prefix(&short_alpha, |s| *s),
+        Ok(&"🚀-alpha")
+    );
 
-    let short_beta = "🚀-beta".truncate_id_by_unique(0, &candidates);
+    let short_beta = "🚀-beta".truncate_id_by_unique(0, &candidates, |s| *s);
     assert_eq!(short_beta, "🚀-b");
-    assert_eq!(candidates.find_by_id_prefix(short_beta), Ok(&"🚀-beta"));
+    assert_eq!(
+        candidates.find_by_id_prefix(&short_beta, |s| *s),
+        Ok(&"🚀-beta")
+    );
 
-    let short_gamma = "🦀-gamma".truncate_id_by_unique(0, &candidates);
+    let short_gamma = "🦀-gamma".truncate_id_by_unique(0, &candidates, |s| *s);
     assert_eq!(short_gamma, "🦀");
-    assert_eq!(candidates.find_by_id_prefix(short_gamma), Ok(&"🦀-gamma"));
+    assert_eq!(
+        candidates.find_by_id_prefix(&short_gamma, |s| *s),
+        Ok(&"🦀-gamma")
+    );
 
-    verify_round_trip_for_collection(&candidates, &[0, 1, 4, 5, 6, 12]);
+    verify_round_trip_for_collection(&candidates, &[0, 1, 4, 5, 6, 12], |s| *s);
 }
 
 #[test]
@@ -566,11 +586,11 @@ fn test_multibyte_2_3_4_byte_encodings() {
     assert_eq!('🚀'.len_utf8(), 4);
     assert_eq!('🦀'.len_utf8(), 4);
 
-    verify_round_trip_for_collection(&candidates, &[0, 2, 4, 7, 10, 15, 30]);
+    verify_round_trip_for_collection(&candidates, &[0, 2, 4, 7, 10, 15, 30], |s| *s);
 
     // Test ambiguity on 2-byte char prefix
     let err = candidates
-        .find_by_id_prefix("id-é-lambda")
+        .find_by_id_prefix("id-é-lambda", |s| *s)
         .expect_err("Should be ambiguous");
     match err {
         ResolveError::Ambiguous {
@@ -581,7 +601,10 @@ fn test_multibyte_2_3_4_byte_encodings() {
             assert_eq!(colliding.len(), 2);
             for c in colliding {
                 let disambiguated = &c[..required_len];
-                assert_eq!(candidates.find_by_id_prefix(disambiguated), Ok(&c.as_str()));
+                assert_eq!(
+                    candidates.find_by_id_prefix(disambiguated, |s| *s),
+                    Ok(&c.as_str())
+                );
             }
         }
         _ => panic!("Expected Ambiguous"),
@@ -606,25 +629,52 @@ fn test_multibyte_boundary_snapping_exact_before_after() {
     let candidates = ["other-identifier"];
 
     // Testing min_len snapping around 4-byte char '🦀'
-    assert_eq!(truncate_id_by_unique(target, 0, &candidates), "🦀"); // divergence is 4
-    assert_eq!(truncate_id_by_unique(target, 1, &candidates), "🦀"); // before boundary: snaps to 4
-    assert_eq!(truncate_id_by_unique(target, 2, &candidates), "🦀"); // before boundary: snaps to 4
-    assert_eq!(truncate_id_by_unique(target, 3, &candidates), "🦀"); // before boundary: snaps to 4
-    assert_eq!(truncate_id_by_unique(target, 4, &candidates), "🦀"); // exact boundary: 4
-    assert_eq!(truncate_id_by_unique(target, 5, &candidates), "🦀-"); // exact boundary after '-'
+    assert_eq!(truncate_id_by_unique(target, 0, &candidates, |s| *s), "🦀"); // divergence is 4
+    assert_eq!(truncate_id_by_unique(target, 1, &candidates, |s| *s), "🦀"); // before boundary: snaps to 4
+    assert_eq!(truncate_id_by_unique(target, 2, &candidates, |s| *s), "🦀"); // before boundary: snaps to 4
+    assert_eq!(truncate_id_by_unique(target, 3, &candidates, |s| *s), "🦀"); // before boundary: snaps to 4
+    assert_eq!(truncate_id_by_unique(target, 4, &candidates, |s| *s), "🦀"); // exact boundary: 4
+    assert_eq!(truncate_id_by_unique(target, 5, &candidates, |s| *s), "🦀-"); // exact boundary after '-'
 
     // Testing min_len snapping around 3-byte char '가' [5..8]
-    assert_eq!(truncate_id_by_unique(target, 6, &candidates), "🦀-가"); // inside '가': snaps to 8
-    assert_eq!(truncate_id_by_unique(target, 7, &candidates), "🦀-가"); // inside '가': snaps to 8
-    assert_eq!(truncate_id_by_unique(target, 8, &candidates), "🦀-가"); // exact boundary: 8
-    assert_eq!(truncate_id_by_unique(target, 9, &candidates), "🦀-가-"); // exact boundary after '-'
+    assert_eq!(
+        truncate_id_by_unique(target, 6, &candidates, |s| *s),
+        "🦀-가"
+    ); // inside '가': snaps to 8
+    assert_eq!(
+        truncate_id_by_unique(target, 7, &candidates, |s| *s),
+        "🦀-가"
+    ); // inside '가': snaps to 8
+    assert_eq!(
+        truncate_id_by_unique(target, 8, &candidates, |s| *s),
+        "🦀-가"
+    ); // exact boundary: 8
+    assert_eq!(
+        truncate_id_by_unique(target, 9, &candidates, |s| *s),
+        "🦀-가-"
+    ); // exact boundary after '-'
 
     // Testing min_len snapping around 2-byte char 'é' [9..11]
-    assert_eq!(truncate_id_by_unique(target, 10, &candidates), "🦀-가-é"); // inside 'é': snaps to 11
-    assert_eq!(truncate_id_by_unique(target, 11, &candidates), "🦀-가-é"); // exact boundary: 11
-    assert_eq!(truncate_id_by_unique(target, 12, &candidates), "🦀-가-é-"); // exact boundary
-    assert_eq!(truncate_id_by_unique(target, 13, &candidates), "🦀-가-é-x"); // full length
-    assert_eq!(truncate_id_by_unique(target, 100, &candidates), "🦀-가-é-x"); // clamp
+    assert_eq!(
+        truncate_id_by_unique(target, 10, &candidates, |s| *s),
+        "🦀-가-é"
+    ); // inside 'é': snaps to 11
+    assert_eq!(
+        truncate_id_by_unique(target, 11, &candidates, |s| *s),
+        "🦀-가-é"
+    ); // exact boundary: 11
+    assert_eq!(
+        truncate_id_by_unique(target, 12, &candidates, |s| *s),
+        "🦀-가-é-"
+    ); // exact boundary
+    assert_eq!(
+        truncate_id_by_unique(target, 13, &candidates, |s| *s),
+        "🦀-가-é-x"
+    ); // full length
+    assert_eq!(
+        truncate_id_by_unique(target, 100, &candidates, |s| *s),
+        "🦀-가-é-x"
+    ); // clamp
 }
 
 #[test]
@@ -636,14 +686,14 @@ fn test_multibyte_split_boundary_preservation() {
     // LCP: "한글-🚀-"
     // '한' (3) + '글' (3) + '-' (1) + '🚀' (4) + '-' (1) = 12 bytes
     // Next char '태' (3 bytes) diverges from '테' (3 bytes) -> divergence = 15 bytes ("한글-🚀-태")
-    let (pfx, rem) = target.split_id_by_unique(0, &candidates);
+    let (pfx, rem) = target.split_id_by_unique(0, &candidates, |s| *s);
     assert_eq!(pfx, "한글-🚀-태");
     assert_eq!(rem, "스크");
     assert_eq!(format!("{pfx}{rem}"), target);
 
     // Verify all splits across arbitrary min_lens produce valid UTF-8
     for min_len in 0..=30 {
-        let (p, r) = target.split_id_by_unique(min_len, &candidates);
+        let (p, r) = target.split_id_by_unique(min_len, &candidates, |s| *s);
         assert_eq!(format!("{p}{r}"), target);
         assert!(std::str::from_utf8(p.as_bytes()).is_ok());
         assert!(std::str::from_utf8(r.as_bytes()).is_ok());
@@ -651,7 +701,7 @@ fn test_multibyte_split_boundary_preservation() {
 }
 
 // ============================================================================
-// 5. Domain Struct Testing with impl_identifiable!
+// 5. Domain Struct Testing with Key Extractor Closures
 // ============================================================================
 
 #[test]
@@ -673,30 +723,54 @@ fn test_domain_commit_trait_and_slice_extensions() {
 
     // Slice extension method: find_by_id_prefix
     let found = commits
-        .find_by_id_prefix("dead")
+        .find_by_id_prefix("dead", |c| &c.hash)
         .expect("Should resolve uniquely");
     assert_eq!(found.message, "docs: update readme");
 
     // Item extension method: truncate_id_by_unique
-    let short_c0 = commits[0].truncate_id_by_unique(7, &commits);
+    let short_c0 = commits[0]
+        .hash
+        .truncate_id_by_unique(7, &commits, |c| &c.hash);
     assert_eq!(short_c0, "c0ffee01");
 
-    let short_c1 = commits[1].truncate_id_by_unique(7, &commits);
+    let short_c1 = commits[1]
+        .hash
+        .truncate_id_by_unique(7, &commits, |c| &c.hash);
     assert_eq!(short_c1, "c0ffee02");
 
-    let short_dead = commits[2].truncate_id_by_unique(4, &commits);
+    let short_dead = commits[2]
+        .hash
+        .truncate_id_by_unique(4, &commits, |c| &c.hash);
     assert_eq!(short_dead, "dead");
 
     // Item extension method: split_id_by_unique
-    let (prefix, rem) = commits[0].split_id_by_unique(7, &commits);
+    let (prefix, rem) = commits[0].hash.split_id_by_unique(7, &commits, |c| &c.hash);
     assert_eq!(prefix, "c0ffee01");
     assert_eq!(rem, "a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7");
     assert_eq!(format!("{prefix}{rem}"), commits[0].hash);
 
     // Extension method on slice round-trip
-    assert_eq!(commits.find_by_id_prefix(short_c0).unwrap(), &commits[0]);
-    assert_eq!(commits.find_by_id_prefix(short_c1).unwrap(), &commits[1]);
-    assert_eq!(commits.find_by_id_prefix(short_dead).unwrap(), &commits[2]);
+    assert_eq!(
+        commits.find_by_id_prefix(&short_c0, |c| &c.hash).unwrap(),
+        &commits[0]
+    );
+    assert_eq!(
+        commits.find_by_id_prefix(&short_c1, |c| &c.hash).unwrap(),
+        &commits[1]
+    );
+    assert_eq!(
+        commits.find_by_id_prefix(&short_dead, |c| &c.hash).unwrap(),
+        &commits[2]
+    );
+
+    // Top-level function equivalents
+    let top_short = truncate_id_by_unique(&commits[0].hash, 7, &commits, |c| &c.hash);
+    assert_eq!(top_short, "c0ffee01");
+    let (top_pfx, top_rem) = split_id_by_unique(&commits[0].hash, 7, &commits, |c| &c.hash);
+    assert_eq!(top_pfx, "c0ffee01");
+    assert_eq!(top_rem, "a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7");
+    let top_found = find_by_id_prefix(&commits, "dead", |c| &c.hash).unwrap();
+    assert_eq!(top_found.message, "docs: update readme");
 }
 
 #[test]
@@ -716,19 +790,21 @@ fn test_domain_borrowed_lifetime_struct() {
         },
     ];
 
-    let found_prod = deploys.find_by_id_prefix("deploy-2026-p").unwrap();
+    let found_prod = deploys
+        .find_by_id_prefix("deploy-2026-p", |d| d.id)
+        .unwrap();
     assert_eq!(found_prod.environment, "production");
 
-    let short = deploys[0].truncate_id_by_unique(5, &deploys);
+    let short = deploys[0].id.truncate_id_by_unique(5, &deploys, |d| d.id);
     assert_eq!(short, "deploy-2026-p");
 
-    let (pfx, rem) = deploys[1].split_id_by_unique(5, &deploys);
+    let (pfx, rem) = deploys[1].id.split_id_by_unique(5, &deploys, |d| d.id);
     assert_eq!(pfx, "deploy-2026-s");
     assert_eq!(rem, "taging-01");
 }
 
 #[test]
-fn test_domain_custom_identifiable_trait_impl() {
+fn test_domain_custom_struct_key_extractor() {
     let issues = [
         IssueTrackerItem {
             key: "PROJ-101".to_string(),
@@ -744,10 +820,10 @@ fn test_domain_custom_identifiable_trait_impl() {
         },
     ];
 
-    let item = issues.find_by_id_prefix("INFRA").unwrap();
+    let item = issues.find_by_id_prefix("INFRA", |i| &i.key).unwrap();
     assert_eq!(item.priority, 3);
 
-    let short = issues[0].truncate_id_by_unique(4, &issues);
+    let short = issues[0].key.truncate_id_by_unique(4, &issues, |i| &i.key);
     assert_eq!(short, "PROJ-101");
 }
 
@@ -762,39 +838,39 @@ fn test_edge_case_single_candidate() {
     // Target is candidate itself: candidate is skipped (cand_id == target_id)
     // Result is governed only by min_len clamped to target length
     assert_eq!(
-        truncate_id_by_unique("solo-identifier-123", 0, &candidates),
+        truncate_id_by_unique("solo-identifier-123", 0, &candidates, |s| *s),
         ""
     );
     assert_eq!(
-        truncate_id_by_unique("solo-identifier-123", 4, &candidates),
+        truncate_id_by_unique("solo-identifier-123", 4, &candidates, |s| *s),
         "solo"
     );
     assert_eq!(
-        truncate_id_by_unique("solo-identifier-123", 50, &candidates),
+        truncate_id_by_unique("solo-identifier-123", 50, &candidates, |s| *s),
         "solo-identifier-123"
     );
 
     // Target is different from sole candidate
     assert_eq!(
-        truncate_id_by_unique("different-item", 0, &candidates),
+        truncate_id_by_unique("different-item", 0, &candidates, |s| *s),
         "d" // divergence is 1
     );
     assert_eq!(
-        truncate_id_by_unique("different-item", 4, &candidates),
+        truncate_id_by_unique("different-item", 4, &candidates, |s| *s),
         "diff"
     );
 
     // Lookup on single candidate
     assert_eq!(
-        candidates.find_by_id_prefix("solo"),
+        candidates.find_by_id_prefix("solo", |s| *s),
         Ok(&"solo-identifier-123")
     );
     assert_eq!(
-        candidates.find_by_id_prefix("solo-identifier-123"),
+        candidates.find_by_id_prefix("solo-identifier-123", |s| *s),
         Ok(&"solo-identifier-123")
     );
     assert_eq!(
-        candidates.find_by_id_prefix("nonexistent"),
+        candidates.find_by_id_prefix("nonexistent", |s| *s),
         Err(ResolveError::NotFound {
             prefix: "nonexistent".to_string()
         })
@@ -806,7 +882,7 @@ fn test_edge_case_duplicate_identical_ids() {
     let candidates = ["duplicate-id", "duplicate-id", "unique-id"];
 
     // Looking up prefix "dup": both duplicates match -> Ambiguous error
-    let err = candidates.find_by_id_prefix("dup").unwrap_err();
+    let err = candidates.find_by_id_prefix("dup", |s| *s).unwrap_err();
     assert_eq!(
         err,
         ResolveError::Ambiguous {
@@ -817,7 +893,9 @@ fn test_edge_case_duplicate_identical_ids() {
     );
 
     // Looking up exact duplicate id: still ambiguous because collection contains 2 identical items
-    let err_exact = candidates.find_by_id_prefix("duplicate-id").unwrap_err();
+    let err_exact = candidates
+        .find_by_id_prefix("duplicate-id", |s| *s)
+        .unwrap_err();
     assert_eq!(
         err_exact,
         ResolveError::Ambiguous {
@@ -830,8 +908,11 @@ fn test_edge_case_duplicate_identical_ids() {
     // Truncating a duplicate item skips identical candidates
     // Divergence with "unique-id" is 1 ('d' vs 'u')
     let target = "duplicate-id";
-    assert_eq!(truncate_id_by_unique(target, 0, &candidates), "d");
-    assert_eq!(truncate_id_by_unique(target, 4, &candidates), "dupl");
+    assert_eq!(truncate_id_by_unique(target, 0, &candidates, |s| *s), "d");
+    assert_eq!(
+        truncate_id_by_unique(target, 4, &candidates, |s| *s),
+        "dupl"
+    );
 }
 
 #[test]
@@ -839,7 +920,9 @@ fn test_edge_case_prefix_longer_than_any_id() {
     let candidates = ["short", "tiny", "mini"];
     let long_prefix = "short-but-way-too-long-to-match-any-candidate";
 
-    let err = candidates.find_by_id_prefix(long_prefix).unwrap_err();
+    let err = candidates
+        .find_by_id_prefix(long_prefix, |s| *s)
+        .unwrap_err();
     assert_eq!(
         err,
         ResolveError::NotFound {
@@ -853,7 +936,7 @@ fn test_edge_case_empty_candidates() {
     let empty: [&str; 0] = [];
 
     // Prefix lookup on empty list -> NotFound
-    let err = empty.find_by_id_prefix("anything").unwrap_err();
+    let err = empty.find_by_id_prefix("anything", |s| *s).unwrap_err();
     assert_eq!(
         err,
         ResolveError::NotFound {
@@ -861,7 +944,7 @@ fn test_edge_case_empty_candidates() {
         }
     );
 
-    let err_empty_prefix = empty.find_by_id_prefix("").unwrap_err();
+    let err_empty_prefix = empty.find_by_id_prefix("", |s| *s).unwrap_err();
     assert_eq!(
         err_empty_prefix,
         ResolveError::NotFound {
@@ -871,14 +954,14 @@ fn test_edge_case_empty_candidates() {
 
     // Truncate against empty candidate list returns min_len clamped
     let target = "sample-identifier";
-    assert_eq!(truncate_id_by_unique(target, 0, &empty), "");
-    assert_eq!(truncate_id_by_unique(target, 6, &empty), "sample");
+    assert_eq!(truncate_id_by_unique(target, 0, &empty, |s| *s), "");
+    assert_eq!(truncate_id_by_unique(target, 6, &empty, |s| *s), "sample");
     assert_eq!(
-        truncate_id_by_unique(target, 50, &empty),
+        truncate_id_by_unique(target, 50, &empty, |s| *s),
         "sample-identifier"
     );
 
-    let (pfx, rem) = split_id_by_unique(target, 6, &empty);
+    let (pfx, rem) = split_id_by_unique(target, 6, &empty, |s| *s);
     assert_eq!(pfx, "sample");
     assert_eq!(rem, "-identifier");
 }
@@ -888,14 +971,26 @@ fn test_edge_case_min_len_zero() {
     let candidates = ["alpha-one", "beta-two", "gamma-three"];
 
     // min_len = 0 returns minimal 1-char divergence
-    assert_eq!(truncate_id_by_unique("alpha-one", 0, &candidates), "a");
-    assert_eq!(truncate_id_by_unique("beta-two", 0, &candidates), "b");
-    assert_eq!(truncate_id_by_unique("gamma-three", 0, &candidates), "g");
+    assert_eq!(
+        truncate_id_by_unique("alpha-one", 0, &candidates, |s| *s),
+        "a"
+    );
+    assert_eq!(
+        truncate_id_by_unique("beta-two", 0, &candidates, |s| *s),
+        "b"
+    );
+    assert_eq!(
+        truncate_id_by_unique("gamma-three", 0, &candidates, |s| *s),
+        "g"
+    );
 
     // Reversible via find_by_id_prefix
-    assert_eq!(candidates.find_by_id_prefix("a"), Ok(&"alpha-one"));
-    assert_eq!(candidates.find_by_id_prefix("b"), Ok(&"beta-two"));
-    assert_eq!(candidates.find_by_id_prefix("g"), Ok(&"gamma-three"));
+    assert_eq!(candidates.find_by_id_prefix("a", |s| *s), Ok(&"alpha-one"));
+    assert_eq!(candidates.find_by_id_prefix("b", |s| *s), Ok(&"beta-two"));
+    assert_eq!(
+        candidates.find_by_id_prefix("g", |s| *s),
+        Ok(&"gamma-three")
+    );
 }
 
 #[test]
@@ -904,10 +999,10 @@ fn test_edge_case_min_len_larger_than_id() {
 
     // min_len = 500 on 5-character string
     let target = "alpha";
-    let truncated = truncate_id_by_unique(target, 500, &candidates);
+    let truncated = truncate_id_by_unique(target, 500, &candidates, |s| *s);
     assert_eq!(truncated, "alpha");
 
-    let (prefix, remainder) = split_id_by_unique(target, 500, &candidates);
+    let (prefix, remainder) = split_id_by_unique(target, 500, &candidates, |s| *s);
     assert_eq!(prefix, "alpha");
     assert_eq!(remainder, "");
     assert_eq!(format!("{prefix}{remainder}"), target);
@@ -915,9 +1010,9 @@ fn test_edge_case_min_len_larger_than_id() {
     // Multi-byte target with large min_len
     let mb_target = "한글태스크";
     let mb_candidates = ["한글프로젝트"];
-    let mb_truncated = truncate_id_by_unique(mb_target, 9999, &mb_candidates);
+    let mb_truncated = truncate_id_by_unique(mb_target, 9999, &mb_candidates, |s| *s);
     assert_eq!(mb_truncated, "한글태스크");
-    let (mb_p, mb_r) = split_id_by_unique(mb_target, 9999, &mb_candidates);
+    let (mb_p, mb_r) = split_id_by_unique(mb_target, 9999, &mb_candidates, |s| *s);
     assert_eq!(mb_p, "한글태스크");
     assert_eq!(mb_r, "");
 }

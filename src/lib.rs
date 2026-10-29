@@ -27,19 +27,16 @@
 //!
 //! ## Idiomatic Usage
 //!
-//! Bring all core traits, extension methods, functions, and macros into scope:
+//! Bring all core traits, extension methods, and functions into scope:
 //!
 //! ```rust
 //! use id_kit::prelude::*;
 //!
-//! // 1. Define a domain struct and implement Identifiable
 //! #[derive(Debug, PartialEq, Eq)]
 //! struct Commit {
 //!     hash: String,
 //!     message: String,
 //! }
-//!
-//! impl_identifiable!(Commit, hash);
 //!
 //! let commits = vec![
 //!     Commit { hash: "a1b2c3d4".to_string(), message: "Initial commit".to_string() },
@@ -47,13 +44,13 @@
 //!     Commit { hash: "f9e8d7c6".to_string(), message: "Release v1.0".to_string() },
 //! ];
 //!
-//! // 2. Prefix lookup via slice extension trait
-//! let found = commits.find_by_id_prefix("f9e")?;
+//! // 1. Prefix lookup via slice extension trait with key_fn closure
+//! let found = commits.find_by_id_prefix("f9e", |c| &c.hash)?;
 //! assert_eq!(found.message, "Release v1.0");
 //!
-//! // 3. Ambiguity handling: when a prefix matches multiple candidates,
+//! // 2. Ambiguity handling: when a prefix matches multiple candidates,
 //! // ResolveError::Ambiguous reports candidates and the required disambiguation length
-//! match commits.find_by_id_prefix("a1b2") {
+//! match commits.find_by_id_prefix("a1b2", |c| &c.hash) {
 //!     Err(ResolveError::Ambiguous { prefix, candidates, required_len }) => {
 //!         assert_eq!(prefix, "a1b2");
 //!         assert_eq!(candidates.len(), 2);
@@ -63,26 +60,26 @@
 //! }
 //!
 //! // Disambiguated query succeeds
-//! let disambiguated = commits.find_by_id_prefix("a1b2c")?;
+//! let disambiguated = commits.find_by_id_prefix("a1b2c", |c| &c.hash)?;
 //! assert_eq!(disambiguated.message, "Initial commit");
 //!
-//! // 4. Unique prefix truncation via item extension trait
-//! let short = commits[0].truncate_id_by_unique(3, &commits);
+//! // 3. Unique prefix truncation via item extension trait (returns owned String)
+//! let short = commits[0].hash.truncate_id_by_unique(3, &commits, |c| &c.hash);
 //! assert_eq!(short, "a1b2c");
 //!
-//! // 5. Unique prefix splitting into (prefix, remainder)
-//! let (prefix, remainder) = commits[0].split_id_by_unique(3, &commits);
+//! // 4. Unique prefix splitting into (prefix, remainder) (returns owned (String, String))
+//! let (prefix, remainder) = commits[0].hash.split_id_by_unique(3, &commits, |c| &c.hash);
 //! assert_eq!(prefix, "a1b2c");
 //! assert_eq!(remainder, "3d4");
 //!
-//! // 6. Top-level function equivalents
-//! let looked_up = find_by_id_prefix(&commits, "a1b2c")?;
+//! // 5. Top-level function equivalents
+//! let looked_up = find_by_id_prefix(&commits, "a1b2c", |c| &c.hash)?;
 //! assert_eq!(looked_up.message, "Initial commit");
 //!
-//! let truncated = truncate_id_by_unique(&commits[2], 4, &commits);
+//! let truncated = truncate_id_by_unique(&commits[2].hash, 4, &commits, |c| &c.hash);
 //! assert_eq!(truncated, "f9e8");
 //!
-//! let (p, r) = split_id_by_unique(&commits[2], 4, &commits);
+//! let (p, r) = split_id_by_unique(&commits[2].hash, 4, &commits, |c| &c.hash);
 //! assert_eq!(p, "f9e8");
 //! assert_eq!(r, "d7c6");
 //!
@@ -92,12 +89,10 @@
 #![forbid(unsafe_code)]
 
 pub mod error;
-pub mod identifiable;
 pub mod lookup;
 pub mod prelude;
 pub mod unique;
 
 pub use error::ResolveError;
-pub use identifiable::Identifiable;
 pub use lookup::{find_by_id_prefix, IdSliceExt};
 pub use unique::{split_id_by_unique, truncate_id_by_unique, IdUniqueExt};

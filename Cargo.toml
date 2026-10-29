@@ -1,10 +1,10 @@
 [package]
 name = "id-kit"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 authors = ["GoCoder <gocoder7@gmail.com>"]
 license = "MIT OR Apache-2.0"
-description = "Zero-dependency Rust ID toolkit: prefix-based ID lookup, LCP collision disambiguation, and minimal unique prefix truncation."
+description = "Zero-dependency Rust ID toolkit: closure-based prefix lookup, LCP collision disambiguation, and owned unique prefix truncation."
 repository = "https://github.com/techton7/id-kit"
 readme = "README.md"
 keywords = ["prefix", "id", "uuid", "ulid", "disambiguation"]

@@ -12,16 +12,14 @@
 //! let candidates = vec!["abc100", "abc200", "abc300", "xyz999"];
 //!
 //! // Top-level function
-//! let unique_prefix = truncate_id_by_unique("abc100", 3, &candidates);
+//! let unique_prefix = truncate_id_by_unique("abc100", 3, &candidates, |s| *s);
 //! assert_eq!(unique_prefix, "abc1");
 //!
 //! // Extension trait
-//! let (prefix, remainder) = "abc100".split_id_by_unique(3, &candidates);
+//! let (prefix, remainder) = "abc100".split_id_by_unique(3, &candidates, |s| *s);
 //! assert_eq!(prefix, "abc1");
 //! assert_eq!(remainder, "00");
 //! ```
-
-use crate::identifiable::Identifiable;
 
 /// Snaps `index` up to the next valid UTF-8 char boundary in `s`.
 /// If `index >= s.len()`, returns `s.len()`.
@@ -77,11 +75,42 @@ pub(crate) fn divergence_len(target: &str, candidate: &str) -> usize {
     }
 }
 
+#[inline]
+fn compute_unique_prefix_len<'a, T, I, K, F>(
+    target: &str,
+    min_len: usize,
+    candidates: I,
+    key_fn: F,
+) -> usize
+where
+    T: 'a,
+    I: IntoIterator<Item = &'a T>,
+    F: Fn(&'a T) -> K,
+    K: AsRef<str>,
+{
+    let snapped_min = ceil_char_boundary(target, min_len.min(target.len()));
+    let mut max_divergence = snapped_min;
+
+    for candidate in candidates {
+        let cand_key = key_fn(candidate);
+        let cand_id = cand_key.as_ref();
+        if cand_id == target {
+            continue;
+        }
+        let div = divergence_len(target, cand_id);
+        if div > max_divergence {
+            max_divergence = div;
+        }
+    }
+
+    max_divergence.min(target.len())
+}
+
 /// Truncates the identifier of `target` to the minimal unique prefix that distinguishes it from all `candidates`.
 ///
-/// Candidates with identical IDs (`candidate.id() == target.id()`) are ignored.
+/// Candidates with identical IDs (`cand_id == target.as_ref()`) are ignored.
 /// The prefix is at least `min_len` bytes (snapped up to the next valid UTF-8 char boundary)
-/// and clamped to `target.id().len()`.
+/// and clamped to `target.as_ref().len()`.
 ///
 /// # Examples
 ///
@@ -92,37 +121,31 @@ pub(crate) fn divergence_len(target: &str, candidate: &str) -> usize {
 /// let candidates = ["4f8b9b456", "4f8a11111", "555555555"];
 ///
 /// // Differentiates from "4f8b9b..." at the 6th char ('a' vs 'b')
-/// assert_eq!(truncate_id_by_unique(target, 4, &candidates), "4f8b9a");
+/// assert_eq!(truncate_id_by_unique(target, 4, &candidates, |s| *s), "4f8b9a");
 /// ```
-pub fn truncate_id_by_unique<'a, T: Identifiable + ?Sized, C: Identifiable>(
-    target: &'a T,
+#[inline]
+pub fn truncate_id_by_unique<'a, T, I, K, F>(
+    target: impl AsRef<str>,
     min_len: usize,
-    candidates: &[C],
-) -> &'a str {
-    let target_id = target.id();
-    let snapped_min = ceil_char_boundary(target_id, min_len.min(target_id.len()));
-    let mut max_divergence = snapped_min;
-
-    for candidate in candidates {
-        let cand_id = candidate.id();
-        if cand_id == target_id {
-            continue;
-        }
-        let div = divergence_len(target_id, cand_id);
-        if div > max_divergence {
-            max_divergence = div;
-        }
-    }
-
-    let final_len = max_divergence.min(target_id.len());
-    &target_id[..final_len]
+    candidates: I,
+    key_fn: F,
+) -> String
+where
+    T: 'a,
+    I: IntoIterator<Item = &'a T>,
+    F: Fn(&'a T) -> K,
+    K: AsRef<str>,
+{
+    let target_ref = target.as_ref();
+    let split_idx = compute_unique_prefix_len(target_ref, min_len, candidates, key_fn);
+    target_ref[..split_idx].to_string()
 }
 
 /// Splits the identifier of `target` into `(unique_prefix, remainder)`.
 ///
-/// Candidates with identical IDs (`candidate.id() == target.id()`) are ignored.
+/// Candidates with identical IDs (`cand_id == target.as_ref()`) are ignored.
 /// The prefix is at least `min_len` bytes (snapped up to the next valid UTF-8 char boundary)
-/// and clamped to `target.id().len()`.
+/// and clamped to `target.as_ref().len()`.
 ///
 /// # Examples
 ///
@@ -132,44 +155,91 @@ pub fn truncate_id_by_unique<'a, T: Identifiable + ?Sized, C: Identifiable>(
 /// let target = "4f8b9a123";
 /// let candidates = ["4f8b9b456", "555555555"];
 ///
-/// let (prefix, remainder) = split_id_by_unique(target, 4, &candidates);
+/// let (prefix, remainder) = split_id_by_unique(target, 4, &candidates, |s| *s);
 /// assert_eq!(prefix, "4f8b9a");
 /// assert_eq!(remainder, "123");
 /// ```
-pub fn split_id_by_unique<'a, T: Identifiable + ?Sized, C: Identifiable>(
-    target: &'a T,
+#[inline]
+pub fn split_id_by_unique<'a, T, I, K, F>(
+    target: impl AsRef<str>,
     min_len: usize,
-    candidates: &[C],
-) -> (&'a str, &'a str) {
-    let target_id = target.id();
-    let prefix = truncate_id_by_unique(target, min_len, candidates);
-    let split_idx = prefix.len();
-    (&target_id[..split_idx], &target_id[split_idx..])
+    candidates: I,
+    key_fn: F,
+) -> (String, String)
+where
+    T: 'a,
+    I: IntoIterator<Item = &'a T>,
+    F: Fn(&'a T) -> K,
+    K: AsRef<str>,
+{
+    let target_ref = target.as_ref();
+    let split_idx = compute_unique_prefix_len(target_ref, min_len, candidates, key_fn);
+    (
+        target_ref[..split_idx].to_string(),
+        target_ref[split_idx..].to_string(),
+    )
 }
 
-/// Extension trait providing unique prefix truncation and splitting on any [`Identifiable`] type.
-pub trait IdUniqueExt: Identifiable {
+/// Extension trait providing unique prefix truncation and splitting on any string-like type.
+pub trait IdUniqueExt {
     /// Truncates this identifier to the minimal unique prefix among `candidates`.
-    fn truncate_id_by_unique<C: Identifiable>(&self, min_len: usize, candidates: &[C]) -> &str;
+    fn truncate_id_by_unique<'a, T, I, K, F>(
+        &self,
+        min_len: usize,
+        candidates: I,
+        key_fn: F,
+    ) -> String
+    where
+        T: 'a,
+        I: IntoIterator<Item = &'a T>,
+        F: Fn(&'a T) -> K,
+        K: AsRef<str>;
 
     /// Splits this identifier into `(unique_prefix, remainder)` among `candidates`.
-    fn split_id_by_unique<C: Identifiable>(&self, min_len: usize, candidates: &[C])
-        -> (&str, &str);
+    fn split_id_by_unique<'a, T, I, K, F>(
+        &self,
+        min_len: usize,
+        candidates: I,
+        key_fn: F,
+    ) -> (String, String)
+    where
+        T: 'a,
+        I: IntoIterator<Item = &'a T>,
+        F: Fn(&'a T) -> K,
+        K: AsRef<str>;
 }
 
-impl<T: Identifiable + ?Sized> IdUniqueExt for T {
+impl<S: AsRef<str> + ?Sized> IdUniqueExt for S {
     #[inline]
-    fn truncate_id_by_unique<C: Identifiable>(&self, min_len: usize, candidates: &[C]) -> &str {
-        truncate_id_by_unique(self, min_len, candidates)
+    fn truncate_id_by_unique<'a, T, I, K, F>(
+        &self,
+        min_len: usize,
+        candidates: I,
+        key_fn: F,
+    ) -> String
+    where
+        T: 'a,
+        I: IntoIterator<Item = &'a T>,
+        F: Fn(&'a T) -> K,
+        K: AsRef<str>,
+    {
+        truncate_id_by_unique(self, min_len, candidates, key_fn)
     }
 
     #[inline]
-    fn split_id_by_unique<C: Identifiable>(
+    fn split_id_by_unique<'a, T, I, K, F>(
         &self,
         min_len: usize,
-        candidates: &[C],
-    ) -> (&str, &str) {
-        split_id_by_unique(self, min_len, candidates)
+        candidates: I,
+        key_fn: F,
+    ) -> (String, String)
+    where
+        T: 'a,
+        I: IntoIterator<Item = &'a T>,
+        F: Fn(&'a T) -> K,
+        K: AsRef<str>,
+    {
+        split_id_by_unique(self, min_len, candidates, key_fn)
     }
 }
 
@@ -259,13 +329,22 @@ mod tests {
         ];
 
         // min_len = 4, but candidate shares 6 chars, so prefix must be 7
-        assert_eq!(truncate_id_by_unique(target, 4, &candidates), "7a8b9c1");
+        assert_eq!(
+            truncate_id_by_unique(target, 4, &candidates, |s| *s),
+            "7a8b9c1"
+        );
 
         // min_len = 8, exceeds required divergence (7), so returns 8
-        assert_eq!(truncate_id_by_unique(target, 8, &candidates), "7a8b9c1d");
+        assert_eq!(
+            truncate_id_by_unique(target, 8, &candidates, |s| *s),
+            "7a8b9c1d"
+        );
 
         // min_len = 20, clamped to target length 10
-        assert_eq!(truncate_id_by_unique(target, 20, &candidates), "7a8b9c1d2e");
+        assert_eq!(
+            truncate_id_by_unique(target, 20, &candidates, |s| *s),
+            "7a8b9c1d2e"
+        );
     }
 
     #[test]
@@ -278,7 +357,7 @@ mod tests {
             "something-else", // LCP "" (0 chars) -> div 1
         ];
 
-        let prefix = truncate_id_by_unique(target, 0, &candidates);
+        let prefix = truncate_id_by_unique(target, 0, &candidates, |s| *s);
         assert_eq!(prefix, "commit-abc-12");
     }
 
@@ -293,11 +372,14 @@ mod tests {
         ];
 
         // With task-40 present, divergence needed is 7 ("task-42")
-        assert_eq!(truncate_id_by_unique(target, 2, &candidates), "task-42");
+        assert_eq!(
+            truncate_id_by_unique(target, 2, &candidates, |s| *s),
+            "task-42"
+        );
 
         // If candidates only contain identical targets:
         let only_self = vec!["task-42", "task-42"];
-        assert_eq!(truncate_id_by_unique(target, 3, &only_self), "tas");
+        assert_eq!(truncate_id_by_unique(target, 3, &only_self, |s| *s), "tas");
     }
 
     #[test]
@@ -306,51 +388,73 @@ mod tests {
         let candidates = ["uvwxyz"]; // divergence is 1 ('a')
 
         // min_len = 0 -> minimal divergence (1)
-        assert_eq!(truncate_id_by_unique(target, 0, &candidates), "a");
+        assert_eq!(truncate_id_by_unique(target, 0, &candidates, |s| *s), "a");
 
         // min_len = 3 -> max(1, 3) = 3
-        assert_eq!(truncate_id_by_unique(target, 3, &candidates), "abc");
+        assert_eq!(truncate_id_by_unique(target, 3, &candidates, |s| *s), "abc");
 
         // min_len = 6 -> full length
-        assert_eq!(truncate_id_by_unique(target, 6, &candidates), "abcdef");
+        assert_eq!(
+            truncate_id_by_unique(target, 6, &candidates, |s| *s),
+            "abcdef"
+        );
 
         // min_len = 100 -> clamped to target.len() (6)
-        assert_eq!(truncate_id_by_unique(target, 100, &candidates), "abcdef");
+        assert_eq!(
+            truncate_id_by_unique(target, 100, &candidates, |s| *s),
+            "abcdef"
+        );
     }
 
     #[test]
     fn test_multibyte_utf8_char_boundaries() {
         // Korean ID: "사용자-001" (each Korean char is 3 bytes, hyphen is 1 byte, digits are 1 byte)
-        // Byte layout:
-        // '사' = [0..3]
-        // '용' = [3..6]
-        // '자' = [6..9]
-        // '-'  = [9..10]
-        // '0'  = [10..11]
-        // '0'  = [11..12]
-        // '1'  = [12..13]
         let target = "사용자-001";
         let candidates = vec!["사용자-002", "관리자-001"];
 
         // min_len = 1 (inside '사' [0..3]): ceil_char_boundary must snap to 3 ('사')
         // But candidate "사용자-002" shares "사용자-00" (12 bytes), so divergence is 13 ("사용자-001")
-        assert_eq!(truncate_id_by_unique(target, 1, &candidates), "사용자-001");
+        assert_eq!(
+            truncate_id_by_unique(target, 1, &candidates, |s| *s),
+            "사용자-001"
+        );
 
         // Only "관리자-001" as candidate (shares no prefix with target):
         let candidates_other = vec!["관리자-001"];
 
         // min_len = 0 -> divergence is 3 ('사')
-        assert_eq!(truncate_id_by_unique(target, 0, &candidates_other), "사");
+        assert_eq!(
+            truncate_id_by_unique(target, 0, &candidates_other, |s| *s),
+            "사"
+        );
 
         // min_len = 1, 2 -> ceil_char_boundary snaps to 3 -> "사"
-        assert_eq!(truncate_id_by_unique(target, 1, &candidates_other), "사");
-        assert_eq!(truncate_id_by_unique(target, 2, &candidates_other), "사");
-        assert_eq!(truncate_id_by_unique(target, 3, &candidates_other), "사");
+        assert_eq!(
+            truncate_id_by_unique(target, 1, &candidates_other, |s| *s),
+            "사"
+        );
+        assert_eq!(
+            truncate_id_by_unique(target, 2, &candidates_other, |s| *s),
+            "사"
+        );
+        assert_eq!(
+            truncate_id_by_unique(target, 3, &candidates_other, |s| *s),
+            "사"
+        );
 
         // min_len = 4, 5 -> ceil_char_boundary snaps to 6 -> "사용"
-        assert_eq!(truncate_id_by_unique(target, 4, &candidates_other), "사용");
-        assert_eq!(truncate_id_by_unique(target, 5, &candidates_other), "사용");
-        assert_eq!(truncate_id_by_unique(target, 6, &candidates_other), "사용");
+        assert_eq!(
+            truncate_id_by_unique(target, 4, &candidates_other, |s| *s),
+            "사용"
+        );
+        assert_eq!(
+            truncate_id_by_unique(target, 5, &candidates_other, |s| *s),
+            "사용"
+        );
+        assert_eq!(
+            truncate_id_by_unique(target, 6, &candidates_other, |s| *s),
+            "사용"
+        );
     }
 
     #[test]
@@ -359,13 +463,13 @@ mod tests {
         let empty: Vec<&str> = Vec::new();
 
         // With empty candidates, prefix length is dictated purely by min_len (snapped to char boundary)
-        assert_eq!(truncate_id_by_unique(target, 0, &empty), "");
-        assert_eq!(truncate_id_by_unique(target, 7, &empty), "commit-");
-        assert_eq!(truncate_id_by_unique(target, 50, &empty), target);
+        assert_eq!(truncate_id_by_unique(target, 0, &empty, |s| *s), "");
+        assert_eq!(truncate_id_by_unique(target, 7, &empty, |s| *s), "commit-");
+        assert_eq!(truncate_id_by_unique(target, 50, &empty, |s| *s), target);
 
         let multibyte = "안녕-세상";
         // min_len = 2 -> snaps to 3 ("안")
-        assert_eq!(truncate_id_by_unique(multibyte, 2, &empty), "안");
+        assert_eq!(truncate_id_by_unique(multibyte, 2, &empty, |s| *s), "안");
     }
 
     #[test]
@@ -374,7 +478,7 @@ mod tests {
         let candidates = vec!["issue-12399", "issue-99999"];
 
         // LCP with "issue-12399" is "issue-123" (9 bytes) -> divergence is 10 ("issue-1234")
-        let (prefix, remainder) = split_id_by_unique(target, 5, &candidates);
+        let (prefix, remainder) = split_id_by_unique(target, 5, &candidates, |s| *s);
         assert_eq!(prefix, "issue-1234");
         assert_eq!(remainder, "5");
         assert_eq!(format!("{prefix}{remainder}"), target);
@@ -382,22 +486,16 @@ mod tests {
         // Multibyte split
         let mb_target = "문서-ABC-1";
         let mb_candidates = vec!["문서-XYZ-2"];
-        let (mb_pfx, mb_rem) = split_id_by_unique(mb_target, 3, &mb_candidates);
+        let (mb_pfx, mb_rem) = split_id_by_unique(mb_target, 3, &mb_candidates, |s| *s);
         assert_eq!(format!("{mb_pfx}{mb_rem}"), mb_target);
-        assert!(mb_target.starts_with(mb_pfx));
-        assert!(mb_target.ends_with(mb_rem));
+        assert!(mb_target.starts_with(&mb_pfx));
+        assert!(mb_target.ends_with(&mb_rem));
     }
 
     #[test]
     fn test_id_unique_ext_trait_methods() {
         struct DomainEntity {
             key: String,
-        }
-
-        impl Identifiable for DomainEntity {
-            fn id(&self) -> &str {
-                &self.key
-            }
         }
 
         let entity = DomainEntity {
@@ -413,24 +511,24 @@ mod tests {
         ];
 
         // Trait method vs top-level function parity
-        let pfx_trait = entity.truncate_id_by_unique(8, &others);
-        let pfx_fn = truncate_id_by_unique(&entity, 8, &others);
+        let pfx_trait = entity.key.truncate_id_by_unique(8, &others, |e| &e.key);
+        let pfx_fn = truncate_id_by_unique(&entity.key, 8, &others, |e| &e.key);
         assert_eq!(pfx_trait, pfx_fn);
         assert_eq!(pfx_trait, "uuid-1234-5");
 
-        let (split_pfx, split_rem) = entity.split_id_by_unique(8, &others);
+        let (split_pfx, split_rem) = entity.key.split_id_by_unique(8, &others, |e| &e.key);
         assert_eq!(split_pfx, "uuid-1234-5");
         assert_eq!(split_rem, "678");
-        assert_eq!(format!("{split_pfx}{split_rem}"), entity.id());
+        assert_eq!(format!("{split_pfx}{split_rem}"), entity.key);
 
         // Also test directly on &str
         let str_target = "node-alpha";
         let str_candidates = ["node-beta", "node-gamma"];
         assert_eq!(
-            str_target.truncate_id_by_unique(4, &str_candidates),
+            str_target.truncate_id_by_unique(4, &str_candidates, |s| *s),
             "node-a"
         );
-        let (s_pfx, s_rem) = str_target.split_id_by_unique(4, &str_candidates);
+        let (s_pfx, s_rem) = str_target.split_id_by_unique(4, &str_candidates, |s| *s);
         assert_eq!(s_pfx, "node-a");
         assert_eq!(s_rem, "lpha");
     }
@@ -441,36 +539,158 @@ mod tests {
         let target = "abc";
         let candidates = ["abcdef"];
         // divergence_len for ("abc", "abcdef") returns target.len() = 3
-        assert_eq!(truncate_id_by_unique(target, 0, &candidates), "abc");
+        assert_eq!(truncate_id_by_unique(target, 0, &candidates, |s| *s), "abc");
 
         // Target is "abcdef", candidate is "abc"
         let target2 = "abcdef";
         let candidates2 = ["abc"];
         // divergence_len is 4 ("abcd")
-        assert_eq!(truncate_id_by_unique(target2, 0, &candidates2), "abcd");
+        assert_eq!(
+            truncate_id_by_unique(target2, 0, &candidates2, |s| *s),
+            "abcd"
+        );
     }
 
     #[test]
-    fn test_lifetime_tied_to_target_not_candidates() {
-        let target = String::from("persistent-target-id");
-        let prefix: &str;
-        let pfx_split: &str;
-        let rem_split: &str;
+    fn test_temporary_target_and_candidates_drop() {
+        let prefix: String;
+        let pfx_split: String;
+        let rem_split: String;
 
         {
+            let temp_target = String::from("persistent-target-id");
             let temp_candidates = vec![
                 String::from("persistent-target-other"),
                 String::from("persistent-candidate"),
             ];
-            prefix = truncate_id_by_unique(&target, 5, &temp_candidates);
-            let (p, r) = split_id_by_unique(&target, 5, &temp_candidates);
+            prefix = truncate_id_by_unique(&temp_target, 5, &temp_candidates, |s| s.as_str());
+            let (p, r) = split_id_by_unique(&temp_target, 5, &temp_candidates, |s| s.as_str());
             pfx_split = p;
             rem_split = r;
-            // temp_candidates drops here at end of scope
+            // temp_target and temp_candidates drop here at end of scope
         }
 
         assert_eq!(prefix, "persistent-target-i");
         assert_eq!(pfx_split, "persistent-target-i");
         assert_eq!(rem_split, "d");
+    }
+
+    #[test]
+    fn test_temporary_target_without_local_binding() {
+        let candidates = vec!["target-100", "target-200"];
+        let truncated = format!("target-{}", 100).truncate_id_by_unique(5, &candidates, |s| *s);
+        assert_eq!(truncated, "target-1");
+
+        let (prefix, remainder) =
+            format!("target-{}", 100).split_id_by_unique(5, &candidates, |s| *s);
+        assert_eq!(prefix, "target-1");
+        assert_eq!(remainder, "00");
+    }
+
+    #[test]
+    fn test_temporary_owned_key_value_type_id() {
+        struct Node {
+            uuid: u128,
+        }
+
+        let nodes = [
+            Node {
+                uuid: 0x1234_5678_0001,
+            },
+            Node {
+                uuid: 0x1234_5678_0002,
+            },
+            Node {
+                uuid: 0x9999_0000_0000,
+            },
+        ];
+
+        let target_uuid = format!("{:012x}", nodes[0].uuid);
+        let truncated =
+            target_uuid.truncate_id_by_unique(4, &nodes, |n| format!("{:012x}", n.uuid));
+        assert_eq!(truncated, "123456780001");
+
+        let (prefix, remainder) =
+            split_id_by_unique(&target_uuid, 4, &nodes, |n| format!("{:012x}", n.uuid));
+        assert_eq!(prefix, "123456780001");
+        assert_eq!(remainder, "");
+    }
+
+    #[test]
+    fn test_borrowed_string_field() {
+        struct Item {
+            id: String,
+            _name: String,
+        }
+
+        let items = vec![
+            Item {
+                id: "item-alpha-1".to_string(),
+                _name: "Alpha 1".to_string(),
+            },
+            Item {
+                id: "item-alpha-2".to_string(),
+                _name: "Alpha 2".to_string(),
+            },
+            Item {
+                id: "item-beta-1".to_string(),
+                _name: "Beta 1".to_string(),
+            },
+        ];
+
+        let truncated = items[0]
+            .id
+            .truncate_id_by_unique(5, &items, |item| &item.id);
+        assert_eq!(truncated, "item-alpha-1");
+
+        let (prefix, remainder) = items[2].id.split_id_by_unique(5, &items, |item| &item.id);
+        assert_eq!(prefix, "item-b");
+        assert_eq!(remainder, "eta-1");
+    }
+
+    #[test]
+    fn test_string_slice_candidates() {
+        let candidates = vec!["abc", "abd"];
+        let truncated = "abc".truncate_id_by_unique(1, &candidates, |s| *s);
+        assert_eq!(truncated, "abc");
+
+        let truncated2 = "abx".truncate_id_by_unique(1, &candidates, |s| *s);
+        assert_eq!(truncated2, "abx");
+
+        let (p, r) = "abx".split_id_by_unique(1, &candidates, |s| *s);
+        assert_eq!(p, "abx");
+        assert_eq!(r, "");
+    }
+
+    #[test]
+    fn test_utf8_multibyte_and_boundary_ceiling() {
+        let target = "한글식별자-01";
+        let candidates = vec!["한글식별자-02", "영문식별자-01"];
+
+        assert_eq!(
+            target.truncate_id_by_unique(2, &candidates, |s| *s),
+            "한글식별자-01"
+        );
+
+        let candidates2 = vec!["영문식별자-01"];
+        assert_eq!(target.truncate_id_by_unique(1, &candidates2, |s| *s), "한");
+        assert_eq!(target.truncate_id_by_unique(2, &candidates2, |s| *s), "한");
+        assert_eq!(target.truncate_id_by_unique(3, &candidates2, |s| *s), "한");
+        assert_eq!(
+            target.truncate_id_by_unique(4, &candidates2, |s| *s),
+            "한글"
+        );
+        assert_eq!(
+            target.truncate_id_by_unique(5, &candidates2, |s| *s),
+            "한글"
+        );
+        assert_eq!(
+            target.truncate_id_by_unique(6, &candidates2, |s| *s),
+            "한글"
+        );
+
+        let (prefix, remainder) = target.split_id_by_unique(4, &candidates2, |s| *s);
+        assert_eq!(prefix, "한글");
+        assert_eq!(remainder, "식별자-01");
     }
 }

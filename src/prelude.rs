@@ -1,9 +1,7 @@
 //! The `id-kit` prelude.
 //!
-//! Re-exports all core traits, macros, error types, and convenience functions:
+//! Re-exports all core traits, error types, and convenience functions:
 //!
-//! - [`Identifiable`]: Trait for types identifiable by a string ID.
-//! - [`impl_identifiable!`]: Macro to implement [`Identifiable`] on domain structs.
 //! - [`IdSliceExt`]: Extension trait on slices providing [`.find_by_id_prefix()`](IdSliceExt::find_by_id_prefix).
 //! - [`IdUniqueExt`]: Extension trait providing [`.truncate_id_by_unique()`](IdUniqueExt::truncate_id_by_unique) and [`.split_id_by_unique()`](IdUniqueExt::split_id_by_unique).
 //! - [`find_by_id_prefix`]: Top-level function for resolving items by ID prefix.
@@ -20,19 +18,17 @@
 //! struct Resource {
 //!     id: String,
 //! }
-//! impl_identifiable!(Resource, id);
 //!
 //! let resources = vec![
 //!     Resource { id: "res-apple".to_string() },
 //!     Resource { id: "res-apricot".to_string() },
 //! ];
 //!
-//! let found = resources.find_by_id_prefix("res-app").unwrap();
-//! assert_eq!(found.id(), "res-apple");
+//! let found = resources.find_by_id_prefix("res-app", |r| &r.id).unwrap();
+//! assert_eq!(found.id, "res-apple");
 //! ```
 
 pub use crate::error::ResolveError;
-pub use crate::identifiable::{impl_identifiable, Identifiable};
 pub use crate::lookup::{find_by_id_prefix, IdSliceExt};
 pub use crate::unique::{split_id_by_unique, truncate_id_by_unique, IdUniqueExt};
 
@@ -45,9 +41,6 @@ mod tests {
         id: String,
         name: String,
     }
-
-    // Verify impl_identifiable! macro import
-    impl_identifiable!(DomainItem, id);
 
     #[test]
     fn test_prelude_imports() {
@@ -66,48 +59,50 @@ mod tests {
             },
         ];
 
-        // 1. Verify Identifiable trait and method
-        assert_eq!(items[0].id(), "item-alpha-1");
-        assert_eq!(Identifiable::id(&items[1]), "item-alpha-2");
-
-        // 2. Verify IdSliceExt extension trait method
-        let slice_res = items.find_by_id_prefix("item-beta");
+        // 1. Verify IdSliceExt extension trait method
+        let slice_res = items.find_by_id_prefix("item-beta", |item| &item.id);
         assert_eq!(slice_res, Ok(&items[2]));
 
-        // 3. Verify find_by_id_prefix top-level function
-        let fn_res = find_by_id_prefix(&items, "item-beta");
+        // 2. Verify find_by_id_prefix top-level function
+        let fn_res = find_by_id_prefix(&items, "item-beta", |item| &item.id);
         assert_eq!(fn_res, Ok(&items[2]));
 
-        // 4. Verify IdUniqueExt extension trait methods
-        let truncated = items[0].truncate_id_by_unique(5, &items);
+        // 3. Verify IdUniqueExt extension trait methods
+        let truncated = items[0]
+            .id
+            .truncate_id_by_unique(5, &items, |item| &item.id);
         assert_eq!(truncated, "item-alpha-1");
 
-        let (unique_prefix, remainder) = items[0].split_id_by_unique(5, &items);
+        let (unique_prefix, remainder) = items[0].id.split_id_by_unique(5, &items, |item| &item.id);
         assert_eq!(unique_prefix, "item-alpha-1");
         assert_eq!(remainder, "");
 
-        let (beta_prefix, beta_rem) = items[2].split_id_by_unique(5, &items);
+        let (beta_prefix, beta_rem) = items[2].id.split_id_by_unique(5, &items, |item| &item.id);
         assert_eq!(beta_prefix, "item-b");
         assert_eq!(beta_rem, "eta-1");
 
-        // 5. Verify truncate_id_by_unique top-level function
-        let fn_truncated = truncate_id_by_unique(&items[2], 5, &items);
+        // 4. Verify truncate_id_by_unique top-level function
+        let fn_truncated = truncate_id_by_unique(&items[2].id, 5, &items, |item| &item.id);
         assert_eq!(fn_truncated, "item-b");
 
-        // 6. Verify split_id_by_unique top-level function
-        let (fn_prefix, fn_rem) = split_id_by_unique(&items[2], 5, &items);
+        // 5. Verify split_id_by_unique top-level function
+        let (fn_prefix, fn_rem) = split_id_by_unique(&items[2].id, 5, &items, |item| &item.id);
         assert_eq!(fn_prefix, "item-b");
         assert_eq!(fn_rem, "eta-1");
 
-        // 7. Verify ResolveError::NotFound
-        let err_not_found = items.find_by_id_prefix("item-gamma").unwrap_err();
+        // 6. Verify ResolveError::NotFound
+        let err_not_found = items
+            .find_by_id_prefix("item-gamma", |item| &item.id)
+            .unwrap_err();
         match err_not_found {
             ResolveError::NotFound { prefix } => assert_eq!(prefix, "item-gamma"),
             ResolveError::Ambiguous { .. } => panic!("expected NotFound, got Ambiguous"),
         }
 
-        // 8. Verify ResolveError::Ambiguous
-        let err_ambiguous = items.find_by_id_prefix("item-alpha").unwrap_err();
+        // 7. Verify ResolveError::Ambiguous
+        let err_ambiguous = items
+            .find_by_id_prefix("item-alpha", |item| &item.id)
+            .unwrap_err();
         match err_ambiguous {
             ResolveError::Ambiguous {
                 prefix,
